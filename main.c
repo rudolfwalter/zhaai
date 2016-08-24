@@ -6,8 +6,6 @@
 #include <errno.h>
 #include "util.h"
 
-#define MIN(a, b) ((a)<(b) ? (a) : (b))
-
 typedef enum {
 	false,
 	true
@@ -139,9 +137,9 @@ struct token token_of(enum token_t type, struct str_view text)
 
 bool lex(struct str_view s, struct vec_token* v)
 {
-	#define ADD(Type, Len) vec_token_push(v, token_of(TOK_##Type, str_view(p, Len)))
+#	define ADD(Type, Len) vec_token_push(v, token_of(TOK_##Type, str_view(p, Len)))
 
-	char* p = s.p;
+	char* p = s.p; /* TODO: respect s.n */
 	size_t k;
 	
 	while (*p) {
@@ -272,7 +270,8 @@ bool lex(struct str_view s, struct vec_token* v)
 	vec_token_shrink(v);
 
 	return true;
-	#undef ADD
+
+#	undef ADD
 }
 
 enum ast_node_t {
@@ -468,46 +467,6 @@ bool parse_double(struct str_view text, double* result)
 		*result = r;
 
 	return success;
-}
-
-struct ast_node* parse_expr(struct input* input);
-void print_ast(struct ast_node* an);
-
-struct ast_node* parse_term(struct input* input, struct map_past_node* parent)
-{
-	struct ast_node* an = malloc(sizeof(struct ast_node));
-	struct token* t = &input->tok[input->cur++];
-	enum op_t op;
-
-	if (t->type == TOK_INT) {
-		an->type = AN_INT_LIT;
-		if (!parse_uint64_t(t->text, &an->_.int_lit))
-			goto err;
-	} else if (t->type == TOK_FLOAT) {
-		an->type = AN_FLOAT_LIT;
-		if (!parse_double(t->text, &an->_.float_lit))
-			goto err;
-	} else if (t->type == TOK_STRING) {
-		an->type = AN_STR_LIT;
-		an->_.str_lit = str_view(t->text.p+1, t->text.n-2);
-	} else if (t->type == TOK_ID) {
-		an->type = AN_ID;
-		an->_.id = t->text;
-	} else if ((op = tok_to_op1(t->type)) != OP_NONE) {
-		an->type = AN_OP1;
-		an->_.op1.type = op;
-		an->_.op1.child = parse_term(input, parent);
-		map_past_node_add(parent, an->_.op1.child, an);
-	} else if (t->type == TOK_LPAREN) {
-		an = parse_expr(input);
-		if (input->tok[input->cur++].type != TOK_RPAREN)
-			goto err;
-	} else goto err;
-
-	return an;
-err:
-	free_ast_node(an);
-	return NULL; /* TODO: better diags */
 }
 
 struct ast_node* parse_expr(struct input* input)
@@ -718,27 +677,6 @@ struct ast_node* parse_expr(struct input* input)
 		}
 	}
 
-	/*{
-		size_t i, j;
-		for (i=0; i<parent.buckets_n; i++) {
-			if (parent.buckets[i].n > 0) {
-				printf("Parent for  ");
-				print_ast(parent.buckets[i].inline_obj.key);
-				printf("  is  ");
-				print_ast(parent.buckets[i].inline_obj.val);
-				printf("\n");
-			}
-			for (j=0; j+1<parent.buckets[i].n; j++) {
-				printf("Parent for  ");
-				print_ast(parent.buckets[i].dynamic_obj[j].key);
-				printf("  is  ");
-				print_ast(parent.buckets[i].dynamic_obj[j].val);
-				printf("\n");
-			}
-		}
-
-	}*/
-
 	{
 		struct ast_node* an = root->_.op1.child;
 		free(root);
@@ -750,7 +688,9 @@ struct ast_node* parse_expr(struct input* input)
 	return root;
 
 err:
-	/* TODO */
+	free_ast_node(root);
+	map_ppast_node_destroy(&slot);
+	map_past_node_destroy(&parent);
 	return NULL;
 
 #	undef t
