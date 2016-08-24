@@ -118,6 +118,10 @@ char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRAC
 
 GS_ASSERT(sizeof(token_t_names) == TOK__N*sizeof(token_t_names[0]));
 
+size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, 0};
+
+GS_ASSERT(sizeof(token_t_len) == TOK__N*sizeof(token_t_len[0]));
+
 struct token {
 	enum token_t type;
 	struct str_view text;
@@ -137,7 +141,8 @@ struct token token_of(enum token_t type, struct str_view text)
 
 bool lex(struct str_view s, struct vec_token* v)
 {
-#	define ADD(Type, Len) vec_token_push(v, token_of(TOK_##Type, str_view(p, Len)))
+#	define add(Kind)       vec_token_push(v, token_of(TOK_##Kind, str_view(p, token_t_len[TOK_##Kind])))
+#	define addl(Kind, Len) vec_token_push(v, token_of(TOK_##Kind, str_view(p, Len)))
 
 	char* p = s.p; /* TODO: respect s.n */
 	size_t k;
@@ -147,38 +152,38 @@ bool lex(struct str_view s, struct vec_token* v)
 		if (!*p) break;
 		
 		switch (*p) {
-			case '(': ADD(LPAREN, 1); break;
-			case ')': ADD(RPAREN, 1); break;
-			case '[': ADD(LBRACKET, 1); break;
-			case ']': ADD(RBRACKET, 1); break;
-			case '{': ADD(LBRACE, 1); break;
-			case '}': ADD(RBRACE, 1); break;
+			case '(': add(LPAREN); break;
+			case ')': add(RPAREN); break;
+			case '[': add(LBRACKET); break;
+			case ']': add(RBRACKET); break;
+			case '{': add(LBRACE); break;
+			case '}': add(RBRACE); break;
 			case ':':
-				if (p[1] == ':') ADD(COLON2, 2);
-				else             ADD(COLON, 1);
+				if (p[1] == ':') add(COLON2);
+				else             add(COLON);
 				break;
 			case '!':
-				if (p[1] == '=') ADD(BANGEQ, 2);
-				else             ADD(BANG, 1);
+				if (p[1] == '=') add(BANGEQ);
+				else             add(BANG);
 			case '=':
-				if (p[1] == '=') ADD(EQ2, 2);
-				else             ADD(EQ, 1);
+				if (p[1] == '=') add(EQ2);
+				else             add(EQ);
 				break;
 			case '<':
-				if (p[1] == '=') ADD(LEQ, 2);
-				else             ADD(LESS, 1);
+				if (p[1] == '=') add(LEQ);
+				else             add(LESS);
 				break;
 			case '>':
-				if (p[1] == '=') ADD(MEQ, 2);
-				else             ADD(MORE, 1);
+				if (p[1] == '=') add(MEQ);
+				else             add(MORE);
 				break;
-			case '+': ADD(PLUS, 1); break;
+			case '+': add(PLUS); break;
 			case '-':
-				if (p[1] == '>')                     ADD(ARROW, 2);
-				else if (p[1] == '-' && p[2] == '-') ADD(MINUS3, 3);
-				else                                 ADD(MINUS, 1);
+				if (p[1] == '>')                     add(ARROW);
+				else if (p[1] == '-' && p[2] == '-') add(MINUS3);
+				else                                 add(MINUS);
 				break;
-			case '*': ADD(STAR, 1); break;
+			case '*': add(STAR); break;
 			case '/':
 				if (p[1] == '/') {
 					while (*p != '\n' && *p != '\0') p++;
@@ -208,22 +213,22 @@ bool lex(struct str_view s, struct vec_token* v)
 					p += k;
 					continue;
 				} else
-					ADD(SLASH, 1);
+					add(SLASH);
 				break;
 			case '.':
-				if (p[1] == '.') ADD(DOT2, 2);
-				else             ADD(DOT, 1);
+				if (p[1] == '.') add(DOT2);
+				else             add(DOT);
 				break;
-			case ',': ADD(COMMA, 1); break;
-			case ';': ADD(SEMI, 1); break;
+			case ',': add(COMMA); break;
+			case ';': add(SEMI); break;
 			case '&':
-				if (p[1] == '&') ADD(AND2, 2);
-				else             ADD(AND, 1);
+				if (p[1] == '&') add(AND2);
+				else             add(AND);
 				break;
 			case '|':
 				if (p[1] != '|')
 					return false; /* TODO: better diags */
-				ADD(PIPE2, 2);
+				add(PIPE2);
 				break;
 			case '#':
 				if (p[1] != '_' && !isalpha(p[1]))
@@ -232,13 +237,13 @@ bool lex(struct str_view s, struct vec_token* v)
 				k = 2;
 				while (p[k] == '_' || isalnum(p[k])) k++;
 				
-				ADD(DIRECTIVE, k);
+				addl(DIRECTIVE, k);
 				break;
 			case '"':
 				k = 1;
 				while (p[k] != '\0' && (p[k] != '"' || p[k-1] == '\\')) k++;
 				
-				ADD(STRING, k+1);
+				addl(STRING, k+1);
 				break;
 			default:
 				if (isdigit(*p)) {
@@ -249,14 +254,14 @@ bool lex(struct str_view s, struct vec_token* v)
 						k++;
 						while (isdigit(p[k])) k++;
 						
-						ADD(FLOAT, k);
+						addl(FLOAT, k);
 					} else
-						ADD(INT, k);
+						addl(INT, k);
 				} else if (*p == '_' || isalpha(*p)) {
 					k = 1;
 					while (p[k] == '_' || isalnum(p[k])) k++;
 					
-					ADD(ID, k);
+					addl(ID, k);
 				} else
 					return false; /* TODO: better diags */
 				break;
@@ -271,7 +276,8 @@ bool lex(struct str_view s, struct vec_token* v)
 
 	return true;
 
-#	undef ADD
+#	undef add
+#	undef addl
 }
 
 enum ast_node_t {
