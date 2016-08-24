@@ -52,19 +52,27 @@ struct str_view str_view_str(struct str s)
 struct str read_all(char* filename)
 {
 	struct str result;
+	long len;
 	FILE* f = fopen(filename, "rb");
-	if (!f) {
-		result.p = NULL;
-		result.n = 0;
-		return result;
-	}
+	if (!f) goto err;
 
 	fseek(f, 0, SEEK_END);
-	result.n = ftell(f);
+	len = ftell(f);
+	if (len < 0) goto err;
+
+	result.n = (size_t) len;
 	fseek(f, 0, SEEK_SET);
 	
 	result.p = malloc(result.n+1);
 	fread(result.p, 1, result.n, f);
+	result.p[result.n] = '\0';
+
+	fclose(f);
+	return result;
+err:
+	fclose(f);
+	result.p = NULL;
+	result.n = 0;
 	return result;
 }
 
@@ -278,7 +286,7 @@ enum ast_node_t {
 	AN_ID,         /* foo                                        */
 	AN_OP1,        /* -x                                         */
 	AN_OP2,        /* x + y                                      */
-	AN_CALL,       /* func(x, y)                                 */
+	AN_OP1N,       /* func(x, y)                                 */
 	AN_VAR_DECL,   /* foo : Bar = baz;                           */
 	AN__N
 };
@@ -289,6 +297,8 @@ GS_ASSERT(sizeof(ast_node_t_names) == AN__N*sizeof(ast_node_t_names[0]));
 
 enum op_t {
 	OP_NONE=-1,
+	OP_CALL,
+	OP_INDEX,
 	OP_DOT,
 	OP_NEG,
 	OP_NOT,
@@ -307,18 +317,31 @@ enum op_t {
 	OP_NEQ,
 	OP_AND,
 	OP_OR,
+	OP__SENTINEL, /* fake operator used in ast construction */
 	OP__N
 };
 
-char* op_t_names[] = {"DOT", "NEG", "NOT", "DEREF", "ADDR", "TIMES", "DIV", "MOD", "ADD", "SUB", "LESS", "LEQ", "MORE", "MEQ", "EQ", "NEQ", "AND", "OR"};
+char* op_t_names[] = {"CALL", "INDEX", "DOT", "NEG", "NOT", "DEREF", "ADDR", "TIMES", "DIV", "MOD", "ADD", "SUB", "LESS", "LEQ", "MORE", "MEQ", "EQ", "NEQ", "AND", "OR", "_SENTINEL"};
 
 GS_ASSERT(sizeof(op_t_names) == OP__N*sizeof(op_t_names[0]));
 
-int OpPrecedence[] = {8, 7, 7, 7, 7, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 2, 1};
+int op_t_precedence[] = {8, 8, 8, 7, 7, 7, 7, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 2, 1, -1};
 
-GS_ASSERT(sizeof(OpPrecedence) == OP__N*sizeof(OpPrecedence[0]));
+GS_ASSERT(sizeof(op_t_precedence) == OP__N*sizeof(op_t_precedence[0]));
 
 struct ast_node;
+
+#define VEC_TYPE struct ast_node*
+#define VEC_TYPE_NAME past_node
+#include "vec.c"
+
+#define MAP_TYPE struct ast_node*
+#define MAP_TYPE_NAME past_node
+#include "map.c"
+
+#define MAP_TYPE struct ast_node**
+#define MAP_TYPE_NAME ppast_node
+#include "map.c"
 
 struct ast_op1 {
 	enum op_t type;
@@ -331,6 +354,12 @@ struct ast_op2 {
 	struct ast_node* right;
 };
 
+struct ast_op1n {
+	enum op_t type;
+	struct ast_node* left;
+	struct vec_past_node rights;
+};
+
 struct ast_node {
 	enum ast_node_t type;
 	union _ {
@@ -340,13 +369,10 @@ struct ast_node {
 		struct str_view id;	
 		struct ast_op1 op1;
 		struct ast_op2 op2;
+		struct ast_op1n op1n;
 		/* TODO */
 	} _;
 };
-
-#define MAP_TYPE struct ast_node*
-#define MAP_TYPE_NAME past_node
-#include "map.c"
 
 void free_ast_node(struct ast_node* node)
 {
@@ -415,7 +441,7 @@ bool parse_uint64_t(struct str_view text, uint64_t* result)
 	for (i=0; i<text.n; i++) {
 		if (!isdigit(text.p[i]))
 			return false;
-		r = r*10 + (text.p[i] - '0');
+		r = r*10 + (size_t)(text.p[i] - '0');
 	}
 
 	*result = r;
@@ -486,45 +512,210 @@ err:
 
 struct ast_node* parse_expr(struct input* input)
 {
+#	define t (input->tok[input->cur])
+
+	/* TODO optimization: use a map that doesn't allocate constantly, share it between calls */
 	struct map_past_node parent = map_past_node_make();
+	struct map_ppast_node slot = map_ppast_node_make();
 	struct ast_node* cur_term;
-	struct ast_node* cur,** ppar;
-	struct ast_node* op_node;
+	struct ast_node* root;
+	struct ast_node** cur_slot;
+	struct ast_node** ppar;
 	enum op_t op;
 
-	cur_term = parse_term(input, &parent);
-	while (true) {
-		op = tok_to_op2(input->tok[input->cur].type);
-		if (op == OP_NONE)
-			break;
-		
-		input->cur++;
+	root = malloc(sizeof(struct ast_node));
+	root->type = AN_OP1;
+	root->_.op1.type = OP__SENTINEL;
+	cur_slot = &root->_.op1.child;
+	cur_term = root;
 
-		cur = cur_term;
-		
-		while ((ppar = map_past_node_get(&parent, cur))) {
-			if (OpPrecedence[(**ppar)._.op1.type] <= OpPrecedence[op]) break;
-			cur = *ppar;
+	map_ppast_node_add(&slot, root, &root);
+
+	while (true) {
+		/* unary prefix operators */
+		if ((op = tok_to_op1(t.type)) != OP_NONE) {
+			input->cur++;
+			*cur_slot = malloc(sizeof(struct ast_node));
+			map_past_node_add(&parent, *cur_slot, cur_term);
+			map_ppast_node_add(&slot, *cur_slot, cur_slot);
+			cur_term = *cur_slot;
+			cur_term->type = AN_OP1;
+			cur_term->_.op1.type = op;
+			cur_slot = &cur_term->_.op1.child;
+			continue;
 		}
 
-		op_node = malloc(sizeof(struct ast_node));
-		op_node->type = AN_OP2;
-		op_node->_.op2.type = op;
+		/* term (literal, identifier, or subexpression) */
+		if (t.type == TOK_LPAREN) {
+			input->cur++;
+			*cur_slot = parse_expr(input);
+			if (*cur_slot == NULL)
+				goto err; /* TODO: better diags */
+			map_past_node_add(&parent, *cur_slot, cur_term);
+			map_ppast_node_add(&slot, *cur_slot, cur_slot);
+			cur_term = *cur_slot;
 
-		if (ppar)
-			map_past_node_add(&parent, op_node, *ppar);
-		map_past_node_add(&parent, cur, op_node);
+			if (t.type != TOK_RPAREN)
+				goto err; /* TODO: better diags */
+		} else {
+			*cur_slot = malloc(sizeof(struct ast_node));
+			map_past_node_add(&parent, *cur_slot, cur_term);
+			map_ppast_node_add(&slot, *cur_slot, cur_slot);
+			cur_term = *cur_slot;
 
-		op_node->_.op2.left = cur;
-		cur_term = parse_term(input, &parent);
-		op_node->_.op2.right = cur_term;
+			if (t.type == TOK_ID) {
+				cur_term->type = AN_ID;
+				cur_term->_.id = t.text;
+			} else if (t.type == TOK_INT) {
+				cur_term->type = AN_INT_LIT;
+				if (!parse_uint64_t(t.text, &cur_term->_.int_lit))
+					goto err; /* TODO: better diags */
+			} else if (t.type == TOK_FLOAT) {
+				cur_term->type = AN_FLOAT_LIT;
+				if (!parse_double(t.text, &cur_term->_.float_lit))
+					goto err; /* TODO: better diags */
+			} else if (t.type == TOK_STRING) {
+				cur_term->type = AN_STR_LIT;
+				cur_term->_.str_lit = str_view(t.text.p+1, t.text.n-2);
+			} else { /* TODO: func literals */
+				goto err; /* TODO: better diags */
+			}
+		}
+		input->cur++;
 
-		/* print_ast(cur_term);printf("\n"); */
-	}
+		/* operators with superunary precedence (call, subscript, dot) */
+		while (true) {
+			struct ast_node* an = malloc(sizeof(struct ast_node));
 
-	while ((ppar = map_past_node_get(&parent, cur_term))) {
-		cur_term = *ppar;
-		/* print_ast(cur_term); printf("\n"); */
+			if (t.type == TOK_LPAREN) {
+				input->cur++;
+
+				while ((ppar = map_past_node_get(&parent, cur_term))) {
+					if (op_t_precedence[(**ppar)._.op1.type] < op_t_precedence[OP_CALL]) break;
+					cur_term = *ppar;
+				}
+
+				an->type = AN_OP1N;
+				an->_.op1n.type = OP_CALL;
+				an->_.op1n.left = cur_term;
+				an->_.op1n.rights = vec_past_node_make(10);
+				
+				if (ppar) map_past_node_add(&parent, an, *ppar);
+				map_past_node_add(&parent, cur_term, an);
+
+				cur_slot = *map_ppast_node_get(&slot, cur_term);
+				*cur_slot = an;
+				map_ppast_node_add(&slot, *cur_slot, cur_slot);
+
+				while (t.type != TOK_RPAREN) {
+					cur_term = parse_expr(input);
+					if (cur_term == NULL)
+						goto err; /* TODO: better diags */
+
+					vec_past_node_push(&an->_.op1n.rights, cur_term);
+
+					/* map_ppast_node_add(&slot, cur_term, &an->_.op1n.rights.v[an->_.op1n.rights.n-1]); */
+
+					if (t.type == TOK_COMMA)
+						input->cur++;
+				}
+
+				cur_term = an;
+			} else if (t.type == TOK_LBRACKET) {
+				input->cur++;
+
+				while ((ppar = map_past_node_get(&parent, cur_term))) {
+					if (op_t_precedence[(**ppar)._.op1.type] < op_t_precedence[OP_INDEX]) break;
+					cur_term = *ppar;
+				}
+
+				an->type = AN_OP2;
+				an->_.op2.type = OP_INDEX;
+				an->_.op2.left = cur_term;
+				
+				if (ppar) map_past_node_add(&parent, an, *ppar);
+				map_past_node_add(&parent, cur_term, an);
+
+				cur_slot = *map_ppast_node_get(&slot, cur_term);
+				*cur_slot = an;
+				map_ppast_node_add(&slot, *cur_slot, cur_slot);
+
+				an->_.op2.right = parse_expr(input);
+				if (an->_.op2.right == NULL)
+					goto err; /* TODO: better diags */
+
+				if (t.type != TOK_RBRACKET)
+					goto err; /* TODO: better diags */
+			} else if (t.type == TOK_DOT) {
+				while ((ppar = map_past_node_get(&parent, cur_term))) {
+					if (op_t_precedence[(**ppar)._.op1.type] < op_t_precedence[OP_DOT]) break;
+					cur_term = *ppar;
+				}
+
+				an->type = AN_OP2;
+				an->_.op2.type = OP_DOT;
+				an->_.op2.left = cur_term;
+
+				if (ppar) map_past_node_add(&parent, an, *ppar);
+				map_past_node_add(&parent, cur_term, an);
+
+				cur_slot = *map_ppast_node_get(&slot, cur_term);
+				*cur_slot = an;
+				map_ppast_node_add(&slot, *cur_slot, cur_slot);
+
+				cur_term = an;
+				cur_slot = &an->_.op2.right;
+
+				input->cur++;
+				if (t.type != TOK_ID)
+					goto err; /* TODO: better diags */
+				
+				an = malloc(sizeof(struct ast_node));
+				an->type = AN_ID;
+				an->_.id = t.text;
+
+				map_past_node_add(&parent, an, cur_term);
+				*cur_slot = an;
+			} else {
+				free(an); /* the just allocated one */
+				break;
+			}
+
+			input->cur++;
+		}
+
+		/* binary operators with subunary precedence */
+		{
+			struct ast_node* an;
+
+			op = tok_to_op2(t.type);
+			if (op == OP_NONE)
+				break;
+			
+			input->cur++;
+
+			while ((ppar = map_past_node_get(&parent, cur_term))) {
+				if (op_t_precedence[(**ppar)._.op1.type] < op_t_precedence[op]) break;
+				cur_term = *ppar;
+			}
+
+			an = malloc(sizeof(struct ast_node));
+			an->type = AN_OP2;
+			an->_.op2.type = op;
+			an->_.op2.left = cur_term;
+
+			if (ppar) map_past_node_add(&parent, an, *ppar);
+			map_past_node_add(&parent, cur_term, an);
+
+			cur_slot = *map_ppast_node_get(&slot, cur_term);
+			*cur_slot = an;
+			map_ppast_node_add(&slot, *cur_slot, cur_slot);
+
+			cur_term = an;
+			cur_slot = &an->_.op2.right;
+
+			/* print_ast(cur_term);printf("\n"); */
+		}
 	}
 
 	/*{
@@ -548,30 +739,51 @@ struct ast_node* parse_expr(struct input* input)
 
 	}*/
 
+	{
+		struct ast_node* an = root->_.op1.child;
+		free(root);
+		root = an;
+	}
+
+	map_ppast_node_destroy(&slot);
 	map_past_node_destroy(&parent);
-	return cur_term;
+	return root;
+
+err:
+	/* TODO */
+	return NULL;
+
+#	undef t
 }
 
 void print_ast(struct ast_node* an)
 {
 	if (an == NULL)
 		printf("NULL[]");
-	if (an->type == AN_INT_LIT)
-		printf("INT_LIT['%u']", (uint32_t) an->_.int_lit);
+	else if (an->type == AN_INT_LIT)
+		printf("INT_%u[]", (uint32_t) an->_.int_lit);
 	else if (an->type == AN_FLOAT_LIT)
-		printf("FLOAT_LIT['%f']", an->_.float_lit);
+		printf("FLOAT_%f[]", an->_.float_lit);
 	else if (an->type == AN_ID)
-		printf("ID['%.*s']", (int) an->_.id.n, an->_.id.p);
+		printf("ID_%.*s[]", (int) an->_.id.n, an->_.id.p);
 	else if (an->type == AN_OP1) {
-		printf("OP1['%s'", op_t_names[an->_.op1.type]);
+		printf("OP1_%s[", op_t_names[an->_.op1.type]);
 		print_ast(an->_.op1.child);
 		printf("]");
 	} else if (an->type == AN_OP2) {
-		printf("OP2['%s'", op_t_names[an->_.op2.type]);
+		printf("OP2_%s[", op_t_names[an->_.op2.type]);
 		print_ast(an->_.op2.left);
 		print_ast(an->_.op2.right);
 		printf("]");
+	} else if (an->type == AN_OP1N) {
+		size_t i;
+		printf("OP1N_%s[", op_t_names[an->_.op1n.type]);
+		print_ast(an->_.op1n.left);
+		for (i=0; i<an->_.op1n.rights.n; i++)
+			print_ast(an->_.op1n.rights.v[i]);
+		printf("]");
 	} else {
+		printf("TODO[]");
 		/* TODO */
 	}
 }
@@ -615,6 +827,7 @@ int main(int argc, char** argv)
 	}
 
 	print_ast(ast);
+	puts("");
 
 	vec_token_destroy(&tokens);
 	return 0;
