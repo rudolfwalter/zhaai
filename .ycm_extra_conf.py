@@ -7,6 +7,7 @@ def FlagsForFile(filename, **kwargs):
 		'-Wno-switch-enum',
 		'-fno-spell-checking',
 		'-ansi',
+		'-pedantic-errors',
 		'-x', 'c',
 		'-isystem', 'C:\\Bin\\msys64\\mingw64\\x86_64-w64-mingw32\\include',
 		'-isystem', 'C:\\Bin\\msys64\\mingw64\\include'
