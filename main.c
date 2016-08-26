@@ -83,7 +83,6 @@ enum token_t
 	TOK_LBRACE,    /*  {            */
 	TOK_RBRACE,    /*  }            */
 	TOK_COLON,     /*  :            */
-	TOK_COLON2,    /*  ::           */
 	TOK_BANG,      /*  !            */
 	TOK_BANGEQ,    /*  !=           */
 	TOK_EQ,        /*  =            */
@@ -114,11 +113,11 @@ enum token_t
 	TOK__N
 };
 
-char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRACE","COLON","COLON2","BANG","BANGEQ","EQ","EQ2","LESS","LEQ","MORE","MEQ","PLUS","MINUS","MINUS3","ARROW","STAR","SLASH","DOT","DOT2","COMMA","SEMI","AND","AND2","PIPE2","DIRECTIVE","INT","FLOAT","STRING","ID","EOF"};
+char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRACE","COLON","BANG","BANGEQ","EQ","EQ2","LESS","LEQ","MORE","MEQ","PLUS","MINUS","MINUS3","ARROW","STAR","SLASH","DOT","DOT2","COMMA","SEMI","AND","AND2","PIPE2","DIRECTIVE","INT","FLOAT","STRING","ID","EOF"};
 
 GS_ASSERT(sizeof(token_t_names) == TOK__N*sizeof(token_t_names[0]));
 
-size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, 0};
+size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, 0};
 
 GS_ASSERT(sizeof(token_t_len) == TOK__N*sizeof(token_t_len[0]));
 
@@ -158,10 +157,7 @@ bool lex(struct str_view s, struct vec_token* v)
 			case ']': add(RBRACKET); break;
 			case '{': add(LBRACE); break;
 			case '}': add(RBRACE); break;
-			case ':':
-				if (p[1] == ':') add(COLON2);
-				else             add(COLON);
-				break;
+			case ':': add(COLON); break;
 			case '!':
 				if (p[1] == '=') add(BANGEQ);
 				else             add(BANG);
@@ -292,7 +288,7 @@ enum ast_node_t {
 	AN_OP1,        /* -x                                         */
 	AN_OP2,        /* x + y                                      */
 	AN_OP1N,       /* func(x, y)                                 */
-	AN_VAR_DECL,   /* foo : Bar = baz;                           */
+	AN_DECL,       /* foo : Bar = baz;  foo : Bar : baz;         */
 	AN__N
 };
 
@@ -365,6 +361,13 @@ struct ast_op1n {
 	struct vec_past_node rights;
 };
 
+struct ast_decl {
+	bool is_const;
+	struct str_view name;
+	struct str_view type;
+	struct ast_node* init;
+};
+
 struct ast_node {
 	enum ast_node_t type;
 	union _ {
@@ -375,12 +378,15 @@ struct ast_node {
 		struct ast_op1 op1;
 		struct ast_op2 op2;
 		struct ast_op1n op1n;
+		struct ast_decl decl;
 		/* TODO */
 	} _;
 };
 
 void free_ast_node(struct ast_node* node)
 {
+	size_t i;
+
 	if (node == NULL) return;
 
 	if (node->type == AN_OP1)
@@ -388,7 +394,15 @@ void free_ast_node(struct ast_node* node)
 	else if (node->type == AN_OP2) {
 		free_ast_node(node->_.op2.left);
 		free_ast_node(node->_.op2.right);
-	}
+	} else if (node->type == AN_OP1N) {
+		free_ast_node(node->_.op1n.left);
+		for (i=0; i<node->_.op1n.rights.n; i++)
+			free_ast_node(node->_.op1n.rights.v[i]);
+		vec_past_node_destroy(&node->_.op1n.rights);
+	} else if (node->type == AN_DECL) {
+		free_ast_node(node->_.decl.init);
+	} else if (node->type != AN_INT_LIT && node->type != AN_FLOAT_LIT && node->type != AN_STR_LIT && node->type != AN_ID)
+		assert(false);
 
 	free(node);
 }
@@ -702,16 +716,56 @@ err:
 #	undef t
 }
 
+struct ast_node* parse_decl(struct input* input)
+{
+#	define t (input->tok[input->cur])
+
+	struct ast_node* an = malloc(sizeof(struct ast_node));
+	
+	an->type = AN_DECL;
+	an->_.decl.type = str_view(NULL, 0);
+	an->_.decl.init = NULL;
+
+	if (t.type != TOK_ID) goto err; /* TODO: better diags */
+	an->_.decl.name = t.text;
+
+	input->cur++;
+	if (t.type != TOK_COLON) goto err; /* TODO: better diags */
+
+	input->cur++;
+	if (t.type == TOK_ID) {
+		an->_.decl.type = t.text;
+		input->cur++;
+	}
+
+	if (t.type == TOK_EQ || t.type == TOK_COLON) {
+		an->_.decl.is_const = t.type==TOK_COLON;
+		input->cur++;
+		an->_.decl.init = parse_expr(input);
+		if (an->_.decl.init == NULL) goto err; /* TODO: better diags */
+	} else {
+		if (an->_.decl.type.n == 0)
+			goto err; /* TODO: better diags */
+	}
+
+	return an;
+err:
+	free_ast_node(an);
+	return NULL;
+
+#	undef t
+}
+
 void print_ast(struct ast_node* an)
 {
 	if (an == NULL)
-		printf("NULL[]");
+		printf("'NULL'");
 	else if (an->type == AN_INT_LIT)
-		printf("INT_%u[]", (uint32_t) an->_.int_lit);
+		printf("'INT: %u'", (uint32_t) an->_.int_lit);
 	else if (an->type == AN_FLOAT_LIT)
-		printf("FLOAT_%f[]", an->_.float_lit);
+		printf("'FLOAT: %f'", an->_.float_lit);
 	else if (an->type == AN_ID)
-		printf("ID_%.*s[]", (int) an->_.id.n, an->_.id.p);
+		printf("'ID: %.*s'", (int) an->_.id.n, an->_.id.p);
 	else if (an->type == AN_OP1) {
 		printf("OP1_%s[", op_t_names[an->_.op1.type]);
 		print_ast(an->_.op1.child);
@@ -728,6 +782,17 @@ void print_ast(struct ast_node* an)
 		for (i=0; i<an->_.op1n.rights.n; i++)
 			print_ast(an->_.op1n.rights.v[i]);
 		printf("]");
+	} else if (an->type == AN_DECL) {
+		printf("DECL_%s", an->_.decl.is_const ? "CONST" : "VAR");
+		printf("['%.*s'", (int) an->_.decl.name.n, an->_.decl.name.p);
+	
+		if (an->_.decl.type.n > 0)
+			printf("'%.*s'", (int) an->_.decl.type.n, an->_.decl.type.p);
+		else
+			printf("'<auto>'");
+
+		if (an->_.decl.init) print_ast(an->_.decl.init);
+		printf("]");
 	} else {
 		printf("TODO[]");
 		/* TODO */
@@ -739,23 +804,23 @@ int main(int argc, char** argv)
 	/*size_t i;*/
 	struct str text;
 	struct vec_token tokens = vec_token_make(20);
-	struct ast_node* ast;
+	struct ast_node* ast=NULL;
 	struct input input;
 
 	if (argc != 2) {
 		fputs("Must provide exactly one filename as argument.\n", stderr);
-		return 1;
+		goto err;
 	}
 
 	text = read_all(argv[1]);
 	if (text.p == NULL) {
 		fputs("Error reading file.\n", stderr);
-		return 1;
+		goto err;
 	}
 
 	if (!lex(str_view_str(text), &tokens)) {
 		fputs("Lexing failed.\n", stderr);
-		return 1;
+		goto err;
 	}
 
 	/* for (i=0; i<tokens.n; i++)
@@ -766,15 +831,23 @@ int main(int argc, char** argv)
 	input.cur = 0;
 	input.text = text.p;
 
-	ast = parse_expr(&input);
+	ast = parse_decl(&input);
 	if (ast == NULL) {
 		fputs("Parsing failed.\n", stderr);
-		return 1;
+		goto err;
 	}
 
 	print_ast(ast);
 	puts("");
 
+	free_ast_node(ast);
 	vec_token_destroy(&tokens);
+	free(text.p);
 	return 0;
+
+err:
+	free_ast_node(ast);
+	vec_token_destroy(&tokens);
+	free(text.p);
+	return 1;
 }
