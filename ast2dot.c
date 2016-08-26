@@ -8,12 +8,13 @@
 static int node = 1;
 static struct vec_int stack;
 
-void error(void)
+void error(int code)
 {
-	printf("\tnERROR [shape=egg,label=\"???\",color=\"1 0 0\"];\n");
-	printf("\tn%d -> nERROR;\n", stack.v[stack.n-1]);
-	printf("}");
-	exit(10);
+	printf("\tnERROR [shape=egg,label=\"???\",color=\"red\"];\n");
+	if (stack.n > 0)
+		printf("\tn%d -> nERROR;\n", stack.v[stack.n-1]);
+	printf("}\n");
+	exit(code);
 }
 
 void push(char* label)
@@ -29,14 +30,14 @@ void push(char* label)
 
 int main(void)
 {
-	char s[100];
+	char s[100]; /*TODO: accept tokens of any length*/
 
 	stack = vec_int_make(10);
 
 	printf("digraph G {\n\tgraph [ordering=out];\n");
 
 	s[0]='\0';
-	if (scanf("%99[a-zA-Z0-9_][", s) < 1) return 1;
+	if (scanf("%99[a-zA-Z0-9_][", s) < 1) error(1);
 
 	vec_int_push(&stack, 0);
 	printf("\n\tn0 [shape=box,label=\"%s\"];\n", s);
@@ -50,7 +51,7 @@ int main(void)
 			if (stack.n == 0)
 				break;
 			else
-				error();
+				error(2);
 		}
 		if (k > 0) {
 			push(s);
@@ -58,8 +59,8 @@ int main(void)
 		}
 
 		k = scanf("'%98[^']'", s+1);
-		if (k == EOF) error();
-		if (k > 0) { /*TODO: accept tokens of any length*/
+		if (k == EOF) error(3);
+		if (k > 0) {
 			s[0]='\'';
 			strcat(s, "\'");
 			push(s);
@@ -68,20 +69,20 @@ int main(void)
 		}
 
 		k = scanf("]%n", &l);
-		if (k == EOF) error();
+		if (k == EOF) error(4);
 		if (l == 0) {
 			if (stack.n == 0)
 				break;
 		} else if (l == 1) {
 			if (stack.n == 0)
-				return 2;
+				error(5);
 			vec_int_pop(&stack);
 			continue;
 		}
 
-		return 3;
+		error(6);
 	}
 
-	printf("}");
+	printf("}\n");
 	return 0;
 }
