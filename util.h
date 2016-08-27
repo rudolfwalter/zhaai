@@ -44,5 +44,11 @@ GS_ASSERT(sizeof(uint32_t) == 4);
 GS_ASSERT(sizeof( int64_t) == 8);
 GS_ASSERT(sizeof(uint64_t) == 8);
 
+#define SZ_MAX ((size_t)-1)
+
+GS_ASSERT(SZ_MAX > 0);
+
+#define RET(Result) do { result = Result; goto end; } while(0)
+
 #endif
 

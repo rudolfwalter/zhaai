@@ -6,6 +6,10 @@
 #include <errno.h>
 #include "util.h"
 
+#define VEC_TYPE void*
+#define VEC_TYPE_NAME pvoid
+#include "vec.c"
+
 typedef enum {
 	false,
 	true
@@ -117,7 +121,7 @@ char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRAC
 
 GS_ASSERT(sizeof(token_t_names) == TOK__N*sizeof(token_t_names[0]));
 
-size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, (size_t)-1, 0};
+size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, 0};
 
 GS_ASSERT(sizeof(token_t_len) == TOK__N*sizeof(token_t_len[0]));
 
@@ -138,11 +142,70 @@ struct token token_of(enum token_t type, struct str_view text)
 	return t;
 }
 
+struct input {
+	struct str_view text;
+
+	struct token* tok;
+	size_t tok_n;
+
+	size_t cur;
+};
+
+enum diag_t {
+	DIAG_ERR,
+	DIAG_WARN
+};
+
+struct diag {
+	enum diag_t level;
+	struct str_view text;
+	char* p;
+	char* msg;
+};
+
+#define VEC_TYPE struct diag
+#define VEC_TYPE_NAME diag
+#include "vec.c"
+
+struct vec_diag diag_stack;
+
+void diag(enum diag_t level, struct str_view text, char* p, char* msg)
+{
+	struct diag d;
+	d.level = level;
+	d.text = text;
+	d.p = p;
+	d.msg = msg;
+	vec_diag_push(&diag_stack, d);
+}
+
+#define DIAG(Level, Msg) diag(DIAG_##Level, input->text, input->tok[input->cur].text.p, Msg)
+
+void print_diag(struct diag* d)
+{
+	char* l,* r;
+
+	fprintf(stderr, d->level == DIAG_ERR ? "ERROR " : "WARNING ");
+	fprintf(stderr, "@ %lu : %s\n", (unsigned long) (d->p - d->text.p), d->msg);
+	
+	if (d->p == NULL) return;
+
+	l = r = d->p;
+	while (l >= d->text.p && *l != '\n') l--;
+	while (r < d->text.p+d->text.n && *r != '\n') r++;
+
+	l++;
+
+	fprintf(stderr, "\t%.*s\n", (int) (r-l), l);
+	fprintf(stderr, "\t%*c\n", (int) (d->p - l + 1), '^');
+}
+
 bool lex(struct str_view s, struct vec_token* v)
 {
 #	define add(Kind)       vec_token_push(v, token_of(TOK_##Kind, str_view(p, token_t_len[TOK_##Kind])))
 #	define addl(Kind, Len) vec_token_push(v, token_of(TOK_##Kind, str_view(p, Len)))
 
+	bool result = true;
 	char* p = s.p; /* TODO: respect s.n */
 	size_t k;
 	
@@ -185,17 +248,18 @@ bool lex(struct str_view s, struct vec_token* v)
 					while (*p != '\n' && *p != '\0') p++;
 					continue;
 				} else if (p[1] == '*') {
-					int nest_level = 1;
+					struct vec_pvoid nesting = vec_pvoid_make(10);
+					vec_pvoid_push(&nesting, p);
 					
 					k = 2;
 					while (p[k] != '\0') {
 						if (p[k] == '/' && p[k+1] == '*') {
-							nest_level++;
+							vec_pvoid_push(&nesting, &p[k]);
 							k++;
 						} else if (p[k] == '*' && p[k+1] == '/') {
-							nest_level--;
+							vec_pvoid_pop(&nesting);
 							k++;
-							if (nest_level == 0) {
+							if (nesting.n == 0) {
 								k++;
 								break;
 							}
@@ -203,9 +267,16 @@ bool lex(struct str_view s, struct vec_token* v)
 						k++;
 					}
 					
-					if (nest_level != 0)
-						return false; /* TODO: better diags */
+					if (nesting.n != 0) {
+						size_t i;
+						for (i=0; i<nesting.n; i++)
+							diag(DIAG_ERR, s, nesting.v[i], "Unclosed block comment.");
+						vec_pvoid_destroy(&nesting);
+						RET(false);
+					}
 					
+					vec_pvoid_destroy(&nesting);
+
 					p += k;
 					continue;
 				} else
@@ -222,13 +293,18 @@ bool lex(struct str_view s, struct vec_token* v)
 				else             add(AND);
 				break;
 			case '|':
-				if (p[1] != '|')
-					return false; /* TODO: better diags */
+				if (p[1] != '|') {
+					diag(DIAG_ERR, s, p+1, "Expected another '|' character.");
+					result = false;
+				}
+						
 				add(PIPE2);
 				break;
 			case '#':
-				if (p[1] != '_' && !isalpha(p[1]))
-					return false; /* TODO: better diags */
+				if (!isalpha(p[1])) {
+					diag(DIAG_ERR, s, p+1, "Expected directive name after '#'.");
+					result = false;
+				}
 				
 				k = 2;
 				while (p[k] == '_' || isalnum(p[k])) k++;
@@ -258,8 +334,10 @@ bool lex(struct str_view s, struct vec_token* v)
 					while (p[k] == '_' || isalnum(p[k])) k++;
 					
 					addl(ID, k);
-				} else
-					return false; /* TODO: better diags */
+				} else {
+					diag(DIAG_ERR, s, p, "Unexpected character.");
+					result = false;
+				}
 				break;
 		}
 		
@@ -267,10 +345,9 @@ bool lex(struct str_view s, struct vec_token* v)
 	}
 	
 	vec_token_push(v, token_of(TOK_EOF, str_view(s.p+s.n, 0)));
-
 	vec_token_shrink(v);
-
-	return true;
+end:
+	return result;
 
 #	undef add
 #	undef addl
@@ -401,20 +478,15 @@ void free_ast_node(struct ast_node* node)
 		vec_past_node_destroy(&node->_.op1n.rights);
 	} else if (node->type == AN_DECL) {
 		free_ast_node(node->_.decl.init);
-	} else if (node->type != AN_INT_LIT && node->type != AN_FLOAT_LIT && node->type != AN_STR_LIT && node->type != AN_ID)
+	} else if (node->type != AN_NONE &&
+	           node->type != AN_INT_LIT &&
+		   node->type != AN_FLOAT_LIT &&
+		   node->type != AN_STR_LIT &&
+		   node->type != AN_ID)
 		assert(false);
 
 	free(node);
 }
-
-struct input {
-	char* text;
-
-	struct token* tok;
-	size_t tok_n;
-
-	size_t cur;
-};
 
 enum op_t tok_to_op1(enum token_t t)
 {
@@ -494,6 +566,8 @@ struct ast_node* parse_expr(struct input* input)
 #	define t (input->tok[input->cur])
 
 	/* TODO optimization: use a map that doesn't allocate constantly, share it between calls */
+	struct input orig_input = *input;
+	struct ast_node* result;
 	struct map_past_node parent = map_past_node_make();
 	struct map_ppast_node slot = map_ppast_node_make();
 	struct ast_node* cur_term;
@@ -507,6 +581,8 @@ struct ast_node* parse_expr(struct input* input)
 	root->_.op1.type = OP__SENTINEL;
 	cur_slot = &root->_.op1.child;
 	cur_term = root;
+
+	result = root;
 
 	map_ppast_node_add(&slot, root, &root);
 
@@ -528,14 +604,18 @@ struct ast_node* parse_expr(struct input* input)
 		if (t.type == TOK_LPAREN) {
 			input->cur++;
 			*cur_slot = parse_expr(input);
-			if (*cur_slot == NULL)
-				goto err; /* TODO: better diags */
+			if (*cur_slot == NULL) {
+				DIAG(ERR, "Expected valid expression in the parentheses.");
+				RET(NULL);
+			}
 			map_past_node_add(&parent, *cur_slot, cur_term);
 			map_ppast_node_add(&slot, *cur_slot, cur_slot);
 			cur_term = *cur_slot;
 
-			if (t.type != TOK_RPAREN)
-				goto err; /* TODO: better diags */
+			if (t.type != TOK_RPAREN) {
+				DIAG(ERR, "Expected ')' after subexpression.");
+				RET(NULL);
+			}
 		} else {
 			*cur_slot = malloc(sizeof(struct ast_node));
 			map_past_node_add(&parent, *cur_slot, cur_term);
@@ -547,17 +627,23 @@ struct ast_node* parse_expr(struct input* input)
 				cur_term->_.id = t.text;
 			} else if (t.type == TOK_INT) {
 				cur_term->type = AN_INT_LIT;
-				if (!parse_uint64_t(t.text, &cur_term->_.int_lit))
-					goto err; /* TODO: better diags */
+				if (!parse_uint64_t(t.text, &cur_term->_.int_lit)) {
+					DIAG(ERR, "Not a valid integer literal (too big?).");
+					result = NULL;
+				}
 			} else if (t.type == TOK_FLOAT) {
 				cur_term->type = AN_FLOAT_LIT;
-				if (!parse_double(t.text, &cur_term->_.float_lit))
-					goto err; /* TODO: better diags */
+				if (!parse_double(t.text, &cur_term->_.float_lit)) {
+					DIAG(ERR, "Not a valid floating-point literal.");
+					result = NULL;
+				}
 			} else if (t.type == TOK_STRING) {
 				cur_term->type = AN_STR_LIT;
 				cur_term->_.str_lit = str_view(t.text.p+1, t.text.n-2);
 			} else { /* TODO: func literals */
-				goto err; /* TODO: better diags */
+				cur_term->type = AN_NONE;
+				DIAG(ERR, "Unexpected token; wanted subexpression between '(' and ')', identifier, or literal.");
+				RET(NULL);
 			}
 		}
 		input->cur++;
@@ -588,8 +674,10 @@ struct ast_node* parse_expr(struct input* input)
 
 				while (t.type != TOK_RPAREN) {
 					cur_term = parse_expr(input);
-					if (cur_term == NULL)
-						goto err; /* TODO: better diags */
+					if (cur_term == NULL) {
+						DIAG(ERR, "Expected valid expression as call argument.");
+						RET(NULL);
+					}
 
 					vec_past_node_push(&an->_.op1n.rights, cur_term);
 
@@ -620,11 +708,15 @@ struct ast_node* parse_expr(struct input* input)
 				map_ppast_node_add(&slot, *cur_slot, cur_slot);
 
 				an->_.op2.right = parse_expr(input);
-				if (an->_.op2.right == NULL)
-					goto err; /* TODO: better diags */
+				if (an->_.op2.right == NULL) {
+					DIAG(ERR, "Expected valid expression as index.");
+					RET(NULL);
+				}
 
-				if (t.type != TOK_RBRACKET)
-					goto err; /* TODO: better diags */
+				if (t.type != TOK_RBRACKET) {
+					DIAG(ERR, "Expected ']'.");
+					RET(NULL);
+				}
 			} else if (t.type == TOK_DOT) {
 				while ((ppar = map_past_node_get(&parent, cur_term))) {
 					if (op_t_precedence[(**ppar)._.op1.type] < op_t_precedence[OP_DOT]) break;
@@ -646,8 +738,10 @@ struct ast_node* parse_expr(struct input* input)
 				cur_slot = &an->_.op2.right;
 
 				input->cur++;
-				if (t.type != TOK_ID)
-					goto err; /* TODO: better diags */
+				if (t.type != TOK_ID) {
+					DIAG(ERR, "Operator '.' must be followed by identifier.");
+					RET(NULL);
+				}
 				
 				an = malloc(sizeof(struct ast_node));
 				an->type = AN_ID;
@@ -682,6 +776,7 @@ struct ast_node* parse_expr(struct input* input)
 			an->type = AN_OP2;
 			an->_.op2.type = op;
 			an->_.op2.left = cur_term;
+			an->_.op2.right = NULL;
 
 			if (ppar) map_past_node_add(&parent, an, *ppar);
 			map_past_node_add(&parent, cur_term, an);
@@ -692,26 +787,21 @@ struct ast_node* parse_expr(struct input* input)
 
 			cur_term = an;
 			cur_slot = &an->_.op2.right;
-
-			/* print_ast(cur_term);printf("\n"); */
 		}
 	}
 
-	{
-		struct ast_node* an = root->_.op1.child;
+end:
+	if (result) {
+		result = root->_.op1.child;
 		free(root);
-		root = an;
+	} else {
+		free_ast_node(root);
+		*input = orig_input;
 	}
 
 	map_ppast_node_destroy(&slot);
 	map_past_node_destroy(&parent);
-	return root;
-
-err:
-	free_ast_node(root);
-	map_ppast_node_destroy(&slot);
-	map_past_node_destroy(&parent);
-	return NULL;
+	return result;
 
 #	undef t
 }
@@ -721,16 +811,23 @@ struct ast_node* parse_decl(struct input* input)
 #	define t (input->tok[input->cur])
 
 	struct ast_node* an = malloc(sizeof(struct ast_node));
+	struct ast_node* result = an;
 	
 	an->type = AN_DECL;
 	an->_.decl.type = str_view(NULL, 0);
 	an->_.decl.init = NULL;
 
-	if (t.type != TOK_ID) goto err; /* TODO: better diags */
+	if (t.type != TOK_ID) {
+		DIAG(ERR, "Expected identifier.");
+		RET(NULL);
+	}
 	an->_.decl.name = t.text;
 
 	input->cur++;
-	if (t.type != TOK_COLON) goto err; /* TODO: better diags */
+	if (t.type != TOK_COLON) {
+		DIAG(ERR, "Expected ':'.");
+		RET(NULL);
+	}
 
 	input->cur++;
 	if (t.type == TOK_ID) {
@@ -742,16 +839,20 @@ struct ast_node* parse_decl(struct input* input)
 		an->_.decl.is_const = t.type==TOK_COLON;
 		input->cur++;
 		an->_.decl.init = parse_expr(input);
-		if (an->_.decl.init == NULL) goto err; /* TODO: better diags */
+		if (an->_.decl.init == NULL) {
+			DIAG(ERR, "Expected valid expression as initializer.");
+			RET(NULL);
+		}
 	} else {
-		if (an->_.decl.type.n == 0)
-			goto err; /* TODO: better diags */
+		if (an->_.decl.type.n == 0) {
+			DIAG(ERR, "Expected ':' or '='.");
+			RET(NULL);
+		}
 	}
 
-	return an;
-err:
-	free_ast_node(an);
-	return NULL;
+end:
+	if (result == NULL) free_ast_node(an);
+	return result;
 
 #	undef t
 }
@@ -801,11 +902,14 @@ void print_ast(struct ast_node* an)
 
 int main(int argc, char** argv)
 {
-	/*size_t i;*/
+	size_t i;
+	bool success;
 	struct str text;
 	struct vec_token tokens = vec_token_make(20);
 	struct ast_node* ast=NULL;
 	struct input input;
+
+	diag_stack = vec_diag_make(1);
 
 	if (argc != 2) {
 		fputs("Must provide exactly one filename as argument.\n", stderr);
@@ -818,7 +922,13 @@ int main(int argc, char** argv)
 		goto err;
 	}
 
-	if (!lex(str_view_str(text), &tokens)) {
+	success = lex(str_view_str(text), &tokens);
+
+	for (i=0; i<diag_stack.n; i++)
+		print_diag(&diag_stack.v[i]);
+	diag_stack.n = 0;
+
+	if (!success) {
 		fputs("Lexing failed.\n", stderr);
 		goto err;
 	}
@@ -829,9 +939,14 @@ int main(int argc, char** argv)
 	input.tok = tokens.v;
 	input.tok_n = tokens.n;
 	input.cur = 0;
-	input.text = text.p;
+	input.text = str_view_str(text);
 
 	ast = parse_decl(&input);
+	
+	for (i=0; i<diag_stack.n; i++)
+		print_diag(&diag_stack.v[i]);
+	diag_stack.n = 0;
+
 	if (ast == NULL) {
 		fputs("Parsing failed.\n", stderr);
 		goto err;
@@ -843,11 +958,12 @@ int main(int argc, char** argv)
 	free_ast_node(ast);
 	vec_token_destroy(&tokens);
 	free(text.p);
+	vec_diag_destroy(&diag_stack);
 	return 0;
-
 err:
 	free_ast_node(ast);
 	vec_token_destroy(&tokens);
 	free(text.p);
+	vec_diag_destroy(&diag_stack);
 	return 1;
 }
