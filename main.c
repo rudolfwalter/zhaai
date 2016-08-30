@@ -1067,7 +1067,8 @@ void print_ast(struct ast_node* an)
 int main(int argc, char** argv)
 {
 	size_t i;
-	bool success;
+	int result = 0;
+	bool lex_success;
 	struct str text;
 	struct vec_token tokens = vec_token_make(20);
 	struct map_ptoken paren_pairs = map_ptoken_make();
@@ -1078,24 +1079,24 @@ int main(int argc, char** argv)
 
 	if (argc != 2) {
 		fputs("Must provide exactly one filename as argument.\n", stderr);
-		goto err;
+		RET(1);
 	}
 
 	text = read_all(argv[1]);
 	if (text.p == NULL) {
 		fputs("Error reading file.\n", stderr);
-		goto err;
+		RET(1);
 	}
 
-	success = lex(str_view_str(text), &tokens, &paren_pairs);
+	lex_success = lex(str_view_str(text), &tokens, &paren_pairs);
 
 	for (i=0; i<diag_stack.n; i++)
 		print_diag(&diag_stack.v[i]);
 	diag_stack.n = 0;
 
-	if (!success) {
+	if (!lex_success) {
 		fputs("Lexing failed.\n", stderr);
-		goto err;
+		RET(1);
 	}
 
 	/* for (i=0; i<tokens.n; i++)
@@ -1115,23 +1116,17 @@ int main(int argc, char** argv)
 
 	if (ast == NULL) {
 		fputs("Parsing failed.\n", stderr);
-		goto err;
+		RET(1);
 	}
 
 	print_ast(ast);
 	puts("");
 
+end:
 	free_ast_node(ast);
 	map_ptoken_destroy(&paren_pairs);
 	vec_token_destroy(&tokens);
 	free(text.p);
 	vec_diag_destroy(&diag_stack);
-	return 0;
-err:
-	free_ast_node(ast);
-	map_ptoken_destroy(&paren_pairs);
-	vec_token_destroy(&tokens);
-	free(text.p);
-	vec_diag_destroy(&diag_stack);
-	return 1;
+	return result;
 }
