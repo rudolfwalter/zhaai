@@ -192,6 +192,9 @@ void diag(enum diag_t level, struct str_view text, char* p, char* msg)
 
 #define DIAG(Level, Msg) diag(DIAG_##Level, input->text, input->cur->text.p, Msg)
 
+#define DIAGHARD(Result, Level, Msg) do { DIAG(Level, Msg); RET(Result); } while(0)
+#define DIAGSOFT(Result, Level, Msg) do { DIAG(Level, Msg); result = Result; } while(0)
+
 void print_diag(struct diag* d)
 {
 	char* l,* r;
@@ -653,18 +656,15 @@ struct ast_node* parse_expr(struct input* input)
 		if (t.type == TOK_LPAREN) {
 			input->cur++;
 			*cur_slot = parse_expr(input);
-			if (*cur_slot == NULL) {
-				DIAG(ERR, "Expected valid expression in the parentheses.");
-				RET(NULL);
-			}
+			if (*cur_slot == NULL)
+				DIAGHARD(NULL, ERR, "Expected valid expression in the parentheses.");
+
 			map_past_node_add(&parent, *cur_slot, cur_term);
 			map_ppast_node_add(&slot, *cur_slot, cur_slot);
 			cur_term = *cur_slot;
 
-			if (t.type != TOK_RPAREN) {
-				DIAG(ERR, "Expected ')' after subexpression.");
-				RET(NULL);
-			}
+			if (t.type != TOK_RPAREN)
+				DIAGHARD(NULL, ERR, "Expected ')' after subexpression.");
 		} else {
 			*cur_slot = malloc(sizeof(struct ast_node));
 			map_past_node_add(&parent, *cur_slot, cur_term);
@@ -676,23 +676,18 @@ struct ast_node* parse_expr(struct input* input)
 				cur_term->_.id = t.text;
 			} else if (t.type == TOK_INT) {
 				cur_term->type = AN_INT_LIT;
-				if (!parse_uint64_t(t.text, &cur_term->_.int_lit)) {
-					DIAG(ERR, "Not a valid integer literal (too big?).");
-					result = NULL;
-				}
+				if (!parse_uint64_t(t.text, &cur_term->_.int_lit))
+					DIAGSOFT(NULL, ERR, "Not a valid integer literal (too big?).");
 			} else if (t.type == TOK_FLOAT) {
 				cur_term->type = AN_FLOAT_LIT;
-				if (!parse_double(t.text, &cur_term->_.float_lit)) {
-					DIAG(ERR, "Not a valid floating-point literal.");
-					result = NULL;
-				}
+				if (!parse_double(t.text, &cur_term->_.float_lit))
+					DIAGSOFT(NULL, ERR, "Not a valid floating-point literal.");
 			} else if (t.type == TOK_STRING) {
 				cur_term->type = AN_STR_LIT;
 				cur_term->_.str_lit = str_view(t.text.p+1, t.text.n-2);
 			} else { /* TODO: func literals */
 				cur_term->type = AN_NONE;
-				DIAG(ERR, "Unexpected token; wanted subexpression between '(' and ')', identifier, or literal.");
-				RET(NULL);
+				DIAGHARD(NULL, ERR, "Expected subexpression between '(' and ')', identifier, or literal.");
 			}
 		}
 		input->cur++;
@@ -723,10 +718,8 @@ struct ast_node* parse_expr(struct input* input)
 
 				while (t.type != TOK_RPAREN) {
 					cur_term = parse_expr(input);
-					if (cur_term == NULL) {
-						DIAG(ERR, "Expected valid expression as call argument.");
-						RET(NULL);
-					}
+					if (cur_term == NULL)
+						DIAGHARD(NULL, ERR, "Expected valid expression as call argument.");
 
 					vec_past_node_push(&an->_.op1n.rights, cur_term);
 
@@ -757,15 +750,11 @@ struct ast_node* parse_expr(struct input* input)
 				map_ppast_node_add(&slot, *cur_slot, cur_slot);
 
 				an->_.op2.right = parse_expr(input);
-				if (an->_.op2.right == NULL) {
-					DIAG(ERR, "Expected valid expression as index.");
-					RET(NULL);
-				}
+				if (an->_.op2.right == NULL)
+					DIAGHARD(NULL, ERR, "Expected valid expression as index.");
 
-				if (t.type != TOK_RBRACKET) {
-					DIAG(ERR, "Expected ']'.");
-					RET(NULL);
-				}
+				if (t.type != TOK_RBRACKET)
+					DIAGHARD(NULL, ERR, "Expected ']'.");
 			} else if (t.type == TOK_DOT) {
 				while ((ppar = map_past_node_get(&parent, cur_term))) {
 					if (op_t_precedence[(**ppar)._.op1.type] < op_t_precedence[OP_DOT]) break;
@@ -787,10 +776,8 @@ struct ast_node* parse_expr(struct input* input)
 				cur_slot = &an->_.op2.right;
 
 				input->cur++;
-				if (t.type != TOK_ID) {
-					DIAG(ERR, "Operator '.' must be followed by identifier.");
-					RET(NULL);
-				}
+				if (t.type != TOK_ID)
+					DIAGHARD(NULL, ERR, "Operator '.' must be followed by identifier.");
 				
 				an = malloc(sizeof(struct ast_node));
 				an->type = AN_ID;
@@ -862,19 +849,15 @@ struct ast_node* parse_code_block(struct input* input)
 
 	an->type = AN_NONE; /* TODO */
 
-	if (input->cur->type != TOK_LBRACE) {
-		DIAG(ERR, "Expected '{'.");
-		RET(NULL);
-	}
+	if (input->cur->type != TOK_LBRACE)
+		DIAGHARD(NULL, ERR, "Expected '{'.");
+
 	input->cur++;
 
 	/* TODO */
 
-	if (input->cur->type != TOK_RBRACE) {
-		DIAG(ERR, "Expected '}'.");
-		RET(NULL);
-	}
-
+	if (input->cur->type != TOK_RBRACE)
+		DIAGHARD(NULL, ERR, "Expected '}'.");
 end:
 	if (result == NULL)
 		free_ast_node(an);
@@ -892,33 +875,29 @@ struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
 	an->_.func.body = NULL;
 	an->_.func.foreign = false;
 
-	if (input->cur->type != TOK_LPAREN) {
-		DIAG(ERR, "Expected parenthesized parameter list at beginning of function literal.");
-		RET(NULL);
-	}
+	if (input->cur->type != TOK_LPAREN)
+		DIAGHARD(NULL, ERR, "Expected parenthesized parameter list at beginning of function literal.");
+
 	input->cur++;
 
 	while (input->cur->type != TOK_RPAREN) {
 		param = malloc(sizeof(struct ast_node));
 		param->type = AN_PARAM;
 
-		if (input->cur->type != TOK_ID) {
-			DIAG(ERR, "Expected parameter name.");
-			RET(NULL);
-		}
+		if (input->cur->type != TOK_ID)
+			DIAGHARD(NULL, ERR, "Expected parameter name.");
+
 		param->_.param.name = input->cur->text;
 
 		input->cur++;
-		if (input->cur->type != TOK_COLON) {
-			DIAG(ERR, "Expected colon.");
-			RET(NULL);
-		}
+		if (input->cur->type != TOK_COLON)
+			DIAGHARD(NULL, ERR, "Expected colon.");
+
 		input->cur++;
 		
-		if (input->cur->type != TOK_ID) {
-			DIAG(ERR, "Expected parameter type name.");
-			RET(NULL);
-		}
+		if (input->cur->type != TOK_ID)
+			DIAGHARD(NULL, ERR, "Expected parameter type name.");
+
 		param->_.param.type = input->cur->text;
 
 		vec_past_node_push(&an->_.func.params, param);
@@ -930,16 +909,15 @@ struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
 	param = NULL;
 	input->cur++;
 
-	if (input->cur->type != TOK_ARROW) { /* TODO: allow implicit return type? */
-		DIAG(ERR, "Expected '->' and return type after parameter list.");
-		RET(NULL);
+	if (input->cur->type != TOK_ARROW) {
+		/* TODO: allow implicit return type? */
+		DIAGHARD(NULL, ERR, "Expected '->' and return type after parameter list.");
 	}
 	input->cur++;
 
-	if (input->cur->type != TOK_ID) {
-		DIAG(ERR, "Expected '->' and return type after parameter list.");
-		RET(NULL);
-	}
+	if (input->cur->type != TOK_ID)
+		DIAGHARD(NULL, ERR, "Expected '->' and return type after parameter list.");
+
 	an->_.func.ret_type = input->cur->text;
 	input->cur++;
 
@@ -947,25 +925,18 @@ struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
 		if (str_view_is(input->cur->text, "foreign")) {
 			if (foreign_allowed)
 				an->_.func.foreign = true;
-			else {
-				DIAG(ERR, "#foreign directive not allowed in this context.");
-				result = NULL;
-			}
-
+			else
+				DIAGSOFT(NULL, ERR, "#foreign directive not allowed in this context.");
 		} else {
 			/* TODO */
-			DIAG(ERR, "Currently only #foreign directive is allowed on functions.");
-			result = NULL;
+			DIAGSOFT(NULL, ERR, "Currently only #foreign directive is allowed on functions.");
 		}
 	}
 
-	if (input->cur->type == TOK_LBRACE && an->_.func.foreign) {
-		DIAG(ERR, "Foreign functions must not have a body.");
-		RET(NULL);
-	} else if (input->cur->type != TOK_LBRACE) {
-		DIAG(ERR, "Expected function body between braces.");
-		RET(NULL);
-	}
+	if (input->cur->type == TOK_LBRACE && an->_.func.foreign)
+		DIAGHARD(NULL, ERR, "Foreign functions must not have a body.");
+	else if (input->cur->type != TOK_LBRACE)
+		DIAGHARD(NULL, ERR, "Expected function body between braces.");
 
 	an->_.func.body = parse_code_block(input);
 	if (an->_.func.body == NULL)
@@ -990,17 +961,14 @@ struct ast_node* parse_decl(struct input* input)
 	an->_.decl.type = str_view(NULL, 0);
 	an->_.decl.init = NULL;
 
-	if (t.type != TOK_ID) {
-		DIAG(ERR, "Expected identifier.");
-		RET(NULL);
-	}
+	if (t.type != TOK_ID)
+		DIAGHARD(NULL, ERR, "Expected identifier.");
+
 	an->_.decl.name = t.text;
 
 	input->cur++;
-	if (t.type != TOK_COLON) {
-		DIAG(ERR, "Expected ':'.");
-		RET(NULL);
-	}
+	if (t.type != TOK_COLON)
+		DIAGHARD(NULL, ERR, "Expected ':'.");
 
 	input->cur++;
 	if (t.type == TOK_ID) {
@@ -1019,25 +987,19 @@ struct ast_node* parse_decl(struct input* input)
 
 			if ((*pair)[1].type == TOK_ARROW || (*pair)[1].type == TOK_LBRACE) {
 				an->_.decl.init = parse_func_literal(input, true /* TODO */);
-				if (an->_.decl.init == NULL) {
-					DIAG(ERR, "Expected valid function literal.");
-					RET(NULL);
-				}
+				if (an->_.decl.init == NULL)
+					DIAGHARD(NULL, ERR, "Expected valid function literal.");
 			}
 		}
 
 		if (an->_.decl.init == NULL) {
 			an->_.decl.init = parse_expr(input);
-			if (an->_.decl.init == NULL) {
-				DIAG(ERR, "Expected valid expression as initializer.");
-				RET(NULL);
-			}
+			if (an->_.decl.init == NULL)
+				DIAGHARD(NULL, ERR, "Expected valid expression as initializer.");
 		}
 	} else {
-		if (an->_.decl.type.n == 0) {
-			DIAG(ERR, "Expected ':' or '='.");
-			RET(NULL);
-		}
+		if (an->_.decl.type.n == 0)
+			DIAGHARD(NULL, ERR, "Expected ':' or '='.");
 	}
 
 end:
