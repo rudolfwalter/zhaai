@@ -3,9 +3,6 @@
 	Optionally, VEC_TYPE_NAME can be defined, if VEC_TYPE is not a valid identifier name (e.g. contains stars).
 */
 
-#include "util.h"
-#include <stdlib.h>
-
 #ifndef VEC_TYPE
 #error VEC_TYPE generic argument must be defined when including vec.c.
 #endif

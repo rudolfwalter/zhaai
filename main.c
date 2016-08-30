@@ -103,6 +103,7 @@ enum token_t
 	TOK_SLASH,     /*  /            */
 	TOK_DOT,       /*  .            */
 	TOK_DOT2,      /*  ..           */
+	TOK_DOT3,      /*  ...          */
 	TOK_COMMA,     /*  ,            */
 	TOK_SEMI,      /*  ;            */
 	TOK_AND,       /*  &            */
@@ -117,11 +118,11 @@ enum token_t
 	TOK__N
 };
 
-char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRACE","COLON","BANG","BANGEQ","EQ","EQ2","LESS","LEQ","MORE","MEQ","PLUS","MINUS","MINUS3","ARROW","STAR","SLASH","DOT","DOT2","COMMA","SEMI","AND","AND2","PIPE2","DIRECTIVE","INT","FLOAT","STRING","ID","EOF"};
+char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRACE","COLON","BANG","BANGEQ","EQ","EQ2","LESS","LEQ","MORE","MEQ","PLUS","MINUS","MINUS3","ARROW","STAR","SLASH","DOT","DOT2","DOT3","COMMA","SEMI","AND","AND2","PIPE2","DIRECTIVE","INT","FLOAT","STRING","ID","EOF"};
 
 GS_ASSERT(sizeof(token_t_names) == TOK__N*sizeof(token_t_names[0]));
 
-size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, 0};
+size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 3, 1, 1, 1, 2, 2, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, 0};
 
 GS_ASSERT(sizeof(token_t_len) == TOK__N*sizeof(token_t_len[0]));
 
@@ -133,6 +134,14 @@ struct token {
 #define VEC_TYPE struct token
 #define VEC_TYPE_NAME token
 #include "vec.c"
+
+#define VEC_TYPE struct token*
+#define VEC_TYPE_NAME ptoken
+#include "vec.c"
+
+#define MAP_TYPE struct token*
+#define MAP_TYPE_NAME ptoken
+#include "map.c"
 
 struct token token_of(enum token_t type, struct str_view text)
 {
@@ -148,7 +157,9 @@ struct input {
 	struct token* tok;
 	size_t tok_n;
 
-	size_t cur;
+	struct token* cur;
+
+	struct map_ptoken* paren_pairs;
 };
 
 enum diag_t {
@@ -179,7 +190,7 @@ void diag(enum diag_t level, struct str_view text, char* p, char* msg)
 	vec_diag_push(&diag_stack, d);
 }
 
-#define DIAG(Level, Msg) diag(DIAG_##Level, input->text, input->tok[input->cur].text.p, Msg)
+#define DIAG(Level, Msg) diag(DIAG_##Level, input->text, input->cur->text.p, Msg)
 
 void print_diag(struct diag* d)
 {
@@ -200,22 +211,37 @@ void print_diag(struct diag* d)
 	fprintf(stderr, "\t%*c\n", (int) (d->p - l + 1), '^');
 }
 
-bool lex(struct str_view s, struct vec_token* v)
+bool lex(struct str_view text, struct vec_token* v, struct map_ptoken* paren_pairs)
 {
 #	define add(Kind)       vec_token_push(v, token_of(TOK_##Kind, str_view(p, token_t_len[TOK_##Kind])))
 #	define addl(Kind, Len) vec_token_push(v, token_of(TOK_##Kind, str_view(p, Len)))
 
 	bool result = true;
-	char* p = s.p; /* TODO: respect s.n */
+	char* p = text.p; /* TODO: respect s.n */
 	size_t k;
+	struct vec_ptoken paren_stack = vec_ptoken_make(10);
 	
 	while (*p) {
 		while (isspace(*p)) p++;
 		if (!*p) break;
 		
 		switch (*p) {
-			case '(': add(LPAREN); break;
-			case ')': add(RPAREN); break;
+			case '(':
+				add(LPAREN);
+				vec_ptoken_push(&paren_stack, &v->v[v->n-1]);
+				break;
+			case ')':
+				add(RPAREN);
+				if (paren_stack.n == 0) {
+					diag(DIAG_ERR, text, p, "Closing parenthesis has no opening pair.");
+					result = false;
+				} else {
+					struct token* pair = vec_ptoken_pop(&paren_stack);
+					map_ptoken_add(paren_pairs, &v->v[v->n-1], pair);
+					map_ptoken_add(paren_pairs, pair, &v->v[v->n-1]);
+					/* TODO: should we only add needed pairs (ones followed by '->' or '{') ? */
+				}
+				break;
 			case '[': add(LBRACKET); break;
 			case ']': add(RBRACKET); break;
 			case '{': add(LBRACE); break;
@@ -270,7 +296,7 @@ bool lex(struct str_view s, struct vec_token* v)
 					if (nesting.n != 0) {
 						size_t i;
 						for (i=0; i<nesting.n; i++)
-							diag(DIAG_ERR, s, nesting.v[i], "Unclosed block comment.");
+							diag(DIAG_ERR, text, nesting.v[i], "Unclosed block comment.");
 						vec_pvoid_destroy(&nesting);
 						RET(false);
 					}
@@ -283,8 +309,10 @@ bool lex(struct str_view s, struct vec_token* v)
 					add(SLASH);
 				break;
 			case '.':
-				if (p[1] == '.') add(DOT2);
-				else             add(DOT);
+				if (p[1] == '.')
+					if (p[2] == '.') add(DOT3);
+					else             add(DOT2);
+				else                     add(DOT);
 				break;
 			case ',': add(COMMA); break;
 			case ';': add(SEMI); break;
@@ -294,7 +322,7 @@ bool lex(struct str_view s, struct vec_token* v)
 				break;
 			case '|':
 				if (p[1] != '|') {
-					diag(DIAG_ERR, s, p+1, "Expected another '|' character.");
+					diag(DIAG_ERR, text, p+1, "Expected another '|' character.");
 					result = false;
 				}
 						
@@ -302,7 +330,7 @@ bool lex(struct str_view s, struct vec_token* v)
 				break;
 			case '#':
 				if (!isalpha(p[1])) {
-					diag(DIAG_ERR, s, p+1, "Expected directive name after '#'.");
+					diag(DIAG_ERR, text, p+1, "Expected directive name after '#'.");
 					result = false;
 				}
 				
@@ -335,7 +363,7 @@ bool lex(struct str_view s, struct vec_token* v)
 					
 					addl(ID, k);
 				} else {
-					diag(DIAG_ERR, s, p, "Unexpected character.");
+					diag(DIAG_ERR, text, p, "Unexpected character.");
 					result = false;
 				}
 				break;
@@ -344,7 +372,7 @@ bool lex(struct str_view s, struct vec_token* v)
 		p += v->v[v->n-1].text.n;
 	}
 	
-	vec_token_push(v, token_of(TOK_EOF, str_view(s.p+s.n, 0)));
+	vec_token_push(v, token_of(TOK_EOF, str_view(text.p+text.n, 0)));
 	vec_token_shrink(v);
 end:
 	return result;
@@ -360,6 +388,7 @@ enum ast_node_t {
 	AN_FLOAT_LIT,  /* 123.45                                     */
 	AN_STR_LIT,    /* "abc"                                      */
 	AN_FUNC_LIT,   /* (x: int) -> float { foo(); return bar(); } */
+	AN_PARAM,      /* x: int                                     */
 	AN_STRUCT_LIT, /*                                            */
 	AN_ID,         /* foo                                        */
 	AN_OP1,        /* -x                                         */
@@ -369,7 +398,7 @@ enum ast_node_t {
 	AN__N
 };
 
-char* ast_node_t_names[] = {"RUN_EXPR", "INT", "FLOAT", "STR", "FUNC", "STRUCT", "ID", "OP1", "OP2", "CALL", "VAR_DECL"};
+char* ast_node_t_names[] = {"RUN_EXPR", "INT", "FLOAT", "STR", "FUNC", "PARAM", "STRUCT", "ID", "OP1", "OP2", "CALL", "VAR_DECL"};
 
 GS_ASSERT(sizeof(ast_node_t_names) == AN__N*sizeof(ast_node_t_names[0]));
 
@@ -445,6 +474,18 @@ struct ast_decl {
 	struct ast_node* init;
 };
 
+struct ast_param {
+	struct str_view name;
+	struct str_view type;
+};
+
+struct ast_func {
+	struct vec_past_node params;
+	struct str_view ret_type;
+	struct ast_node* body;
+	bool foreign; /* TODO: replace with directive vector */
+};
+
 struct ast_node {
 	enum ast_node_t type;
 	union _ {
@@ -456,6 +497,8 @@ struct ast_node {
 		struct ast_op2 op2;
 		struct ast_op1n op1n;
 		struct ast_decl decl;
+		struct ast_func func;
+		struct ast_param param;
 		/* TODO */
 	} _;
 };
@@ -478,11 +521,17 @@ void free_ast_node(struct ast_node* node)
 		vec_past_node_destroy(&node->_.op1n.rights);
 	} else if (node->type == AN_DECL) {
 		free_ast_node(node->_.decl.init);
+	} else if (node->type == AN_FUNC_LIT) {
+		for (i=0; i<node->_.func.params.n; i++)
+			free_ast_node(node->_.func.params.v[i]);
+		vec_past_node_destroy(&node->_.func.params);
+		free_ast_node(node->_.func.body);
 	} else if (node->type != AN_NONE &&
 	           node->type != AN_INT_LIT &&
 		   node->type != AN_FLOAT_LIT &&
 		   node->type != AN_STR_LIT &&
-		   node->type != AN_ID)
+		   node->type != AN_ID &&
+		   node->type != AN_PARAM)
 		assert(false);
 
 	free(node);
@@ -563,7 +612,7 @@ bool parse_double(struct str_view text, double* result)
 
 struct ast_node* parse_expr(struct input* input)
 {
-#	define t (input->tok[input->cur])
+#	define t (*input->cur)
 
 	/* TODO optimization: use a map that doesn't allocate constantly, share it between calls */
 	struct input orig_input = *input;
@@ -806,9 +855,133 @@ end:
 #	undef t
 }
 
+struct ast_node* parse_code_block(struct input* input)
+{
+	struct ast_node* an = malloc(sizeof(struct ast_node));
+	struct ast_node* result = an;
+
+	an->type = AN_NONE; /* TODO */
+
+	if (input->cur->type != TOK_LBRACE) {
+		DIAG(ERR, "Expected '{'.");
+		RET(NULL);
+	}
+	input->cur++;
+
+	/* TODO */
+
+	if (input->cur->type != TOK_RBRACE) {
+		DIAG(ERR, "Expected '}'.");
+		RET(NULL);
+	}
+
+end:
+	if (result == NULL)
+		free_ast_node(an);
+	return result;
+}
+
+struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
+{
+	struct ast_node* an = malloc(sizeof(struct ast_node));
+	struct ast_node* result = an;
+	struct ast_node* param = NULL;
+
+	an->type = AN_FUNC_LIT;
+	an->_.func.params = vec_past_node_make(1);
+	an->_.func.body = NULL;
+	an->_.func.foreign = false;
+
+	if (input->cur->type != TOK_LPAREN) {
+		DIAG(ERR, "Expected parenthesized parameter list at beginning of function literal.");
+		RET(NULL);
+	}
+	input->cur++;
+
+	while (input->cur->type != TOK_RPAREN) {
+		param = malloc(sizeof(struct ast_node));
+		param->type = AN_PARAM;
+
+		if (input->cur->type != TOK_ID) {
+			DIAG(ERR, "Expected parameter name.");
+			RET(NULL);
+		}
+		param->_.param.name = input->cur->text;
+
+		input->cur++;
+		if (input->cur->type != TOK_COLON) {
+			DIAG(ERR, "Expected colon.");
+			RET(NULL);
+		}
+		input->cur++;
+		
+		if (input->cur->type != TOK_ID) {
+			DIAG(ERR, "Expected parameter type name.");
+			RET(NULL);
+		}
+		param->_.param.type = input->cur->text;
+
+		vec_past_node_push(&an->_.func.params, param);
+		input->cur++;
+
+		if (input->cur->type == TOK_COMMA)
+			input->cur++;
+	}
+	param = NULL;
+	input->cur++;
+
+	if (input->cur->type != TOK_ARROW) { /* TODO: allow implicit return type? */
+		DIAG(ERR, "Expected '->' and return type after parameter list.");
+		RET(NULL);
+	}
+	input->cur++;
+
+	if (input->cur->type != TOK_ID) {
+		DIAG(ERR, "Expected '->' and return type after parameter list.");
+		RET(NULL);
+	}
+	an->_.func.ret_type = input->cur->text;
+	input->cur++;
+
+	if (input->cur->type == TOK_DIRECTIVE) {
+		if (str_view_is(input->cur->text, "foreign")) {
+			if (foreign_allowed)
+				an->_.func.foreign = true;
+			else {
+				DIAG(ERR, "#foreign directive not allowed in this context.");
+				result = NULL;
+			}
+
+		} else {
+			/* TODO */
+			DIAG(ERR, "Currently only #foreign directive is allowed on functions.");
+			result = NULL;
+		}
+	}
+
+	if (input->cur->type == TOK_LBRACE && an->_.func.foreign) {
+		DIAG(ERR, "Foreign functions must not have a body.");
+		RET(NULL);
+	} else if (input->cur->type != TOK_LBRACE) {
+		DIAG(ERR, "Expected function body between braces.");
+		RET(NULL);
+	}
+
+	an->_.func.body = parse_code_block(input);
+	if (an->_.func.body == NULL)
+		RET(NULL);
+
+end:
+	if (result == NULL) {
+		free(param);
+		free_ast_node(an);
+	}
+	return result;
+}
+
 struct ast_node* parse_decl(struct input* input)
 {
-#	define t (input->tok[input->cur])
+#	define t (*input->cur)
 
 	struct ast_node* an = malloc(sizeof(struct ast_node));
 	struct ast_node* result = an;
@@ -838,10 +1011,27 @@ struct ast_node* parse_decl(struct input* input)
 	if (t.type == TOK_EQ || t.type == TOK_COLON) {
 		an->_.decl.is_const = t.type==TOK_COLON;
 		input->cur++;
-		an->_.decl.init = parse_expr(input);
+
+		/* TODO: allow function literals in expressions, not just as self-standing initializers */
+		if (t.type == TOK_LPAREN) {
+			struct token** pair = map_ptoken_get(input->paren_pairs, &t);
+			assert(pair != NULL);
+
+			if ((*pair)[1].type == TOK_ARROW || (*pair)[1].type == TOK_LBRACE) {
+				an->_.decl.init = parse_func_literal(input, true /* TODO */);
+				if (an->_.decl.init == NULL) {
+					DIAG(ERR, "Expected valid function literal.");
+					RET(NULL);
+				}
+			}
+		}
+
 		if (an->_.decl.init == NULL) {
-			DIAG(ERR, "Expected valid expression as initializer.");
-			RET(NULL);
+			an->_.decl.init = parse_expr(input);
+			if (an->_.decl.init == NULL) {
+				DIAG(ERR, "Expected valid expression as initializer.");
+				RET(NULL);
+			}
 		}
 	} else {
 		if (an->_.decl.type.n == 0) {
@@ -859,8 +1049,12 @@ end:
 
 void print_ast(struct ast_node* an)
 {
+	size_t i;
+
 	if (an == NULL)
 		printf("'NULL'");
+	else if (an->type == AN_NONE)
+		printf("'NONE'");
 	else if (an->type == AN_INT_LIT)
 		printf("'INT: %u'", (uint32_t) an->_.int_lit);
 	else if (an->type == AN_FLOAT_LIT)
@@ -877,7 +1071,6 @@ void print_ast(struct ast_node* an)
 		print_ast(an->_.op2.right);
 		printf("]");
 	} else if (an->type == AN_OP1N) {
-		size_t i;
 		printf("OP1N_%s[", op_t_names[an->_.op1n.type]);
 		print_ast(an->_.op1n.left);
 		for (i=0; i<an->_.op1n.rights.n; i++)
@@ -894,6 +1087,15 @@ void print_ast(struct ast_node* an)
 
 		if (an->_.decl.init) print_ast(an->_.decl.init);
 		printf("]");
+	} else if (an->type == AN_FUNC_LIT) {
+		printf("FUNC['%.*s'", (int) an->_.func.ret_type.n, an->_.func.ret_type.p);
+		for (i=0; i<an->_.func.params.n; i++)
+			print_ast(an->_.func.params.v[i]);
+		print_ast(an->_.func.body);
+		printf("]");
+	} else if (an->type == AN_PARAM) {
+		printf("PARAM['%.*s''%.*s']", (int) an->_.param.name.n, an->_.param.name.p,
+		                              (int) an->_.param.type.n, an->_.param.type.p);
 	} else {
 		printf("TODO[]");
 		/* TODO */
@@ -906,6 +1108,7 @@ int main(int argc, char** argv)
 	bool success;
 	struct str text;
 	struct vec_token tokens = vec_token_make(20);
+	struct map_ptoken paren_pairs = map_ptoken_make();
 	struct ast_node* ast=NULL;
 	struct input input;
 
@@ -922,7 +1125,7 @@ int main(int argc, char** argv)
 		goto err;
 	}
 
-	success = lex(str_view_str(text), &tokens);
+	success = lex(str_view_str(text), &tokens, &paren_pairs);
 
 	for (i=0; i<diag_stack.n; i++)
 		print_diag(&diag_stack.v[i]);
@@ -938,10 +1141,11 @@ int main(int argc, char** argv)
 	
 	input.tok = tokens.v;
 	input.tok_n = tokens.n;
-	input.cur = 0;
+	input.cur = tokens.v;
+	input.paren_pairs = &paren_pairs;
 	input.text = str_view_str(text);
 
-	ast = parse_decl(&input);
+	ast = parse_func_literal(&input, true);
 	
 	for (i=0; i<diag_stack.n; i++)
 		print_diag(&diag_stack.v[i]);
@@ -956,12 +1160,14 @@ int main(int argc, char** argv)
 	puts("");
 
 	free_ast_node(ast);
+	map_ptoken_destroy(&paren_pairs);
 	vec_token_destroy(&tokens);
 	free(text.p);
 	vec_diag_destroy(&diag_stack);
 	return 0;
 err:
 	free_ast_node(ast);
+	map_ptoken_destroy(&paren_pairs);
 	vec_token_destroy(&tokens);
 	free(text.p);
 	vec_diag_destroy(&diag_stack);

@@ -5,10 +5,6 @@
 	identifier name (e.g. contains stars), it is also mandatory.
 */
 
-#include <stdlib.h>
-#include <assert.h>
-#include "util.h"
-
 #ifndef MAP_TYPE
 #error MAP_TYPE generic argument must be defined when including map.c.
 #endif
