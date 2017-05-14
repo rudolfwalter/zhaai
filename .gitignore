@@ -1,8 +1,5 @@
-.idea/*
-__pycache__/*
 build/*
 *.swp
 *.old
 *.exe
-*.pyc
-
+*.out
