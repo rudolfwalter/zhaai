@@ -41,6 +41,7 @@ void VEC_DESTROY_FUNC(struct VEC_STRUCT* v)
 void VEC_PUSH_FUNC(struct VEC_STRUCT* v, VEC_TYPE val)
 {
 	if (v->n == v->sz) {
+		v->sz++;
 		v->sz *= 2;
 		v->v = realloc(v->v, sizeof(VEC_TYPE) * v->sz);
 	}
