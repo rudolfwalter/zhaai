@@ -16,8 +16,8 @@ do
 	if [[ "$f" == *.[ch] ]]
 	then
 		clear
-		echo COMPILING...
-		echo
+		#echo COMPILING...
+		#echo
 
 		if clang -ansi \
 			-Weverything \
@@ -30,7 +30,7 @@ do
 			-fno-strict-aliasing \
 			"$dir/main.c"
 		then
-			echo
+			#echo
 			echo COMPILATION SUCCESSFUL.
 		fi
 	fi
