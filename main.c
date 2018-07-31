@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <errno.h>
 #include "util.h"
+#include "bits.c"
 
 #define VEC_TYPE void*
 #define VEC_TYPE_NAME pvoid
@@ -1043,6 +1044,95 @@ void print_ast(struct ast_node* an)
 	}
 }
 
+#define VEC_TYPE uint64_t
+#define VEC_TYPE_NAME u64
+#include "vec.c"
+
+enum instruction
+{
+	IN_NOP,
+	IN_DIE,
+	IN_MVI, /* to, fromptr */
+	IN_MOV, /* to, from    */
+	IN_ADD, /* to, from    */
+	IN_SUB, /* to, from    */
+	IN_MUL, /* to, from    */
+	IN_DIV, /* to, from    */
+	IN_MOD, /* to, from    */
+	IN_CMP, /* left, right (result goes into reg 0) */
+	IN_IN,  /* to, from    */
+	IN_OUT, /* to, from    */
+	IN_JMP, /* to          */
+	IN_JZ,  /* reg, to     */
+	IN__N
+};
+
+uint64_t alloc_reg(struct vec_u64* regmap /*array of bits, 0=used, 1=free*/)
+{
+	size_t i;
+	for (i=0; i<regmap->n; i++) {
+		unsigned k = bit_ffs(regmap->v[i]);
+		if (k) {
+			k--; /* ffs(2**n)==n+1 */
+			regmap->v[i] &= ~(1 << k);
+			return i*64 + k;
+		}
+	}
+	vec_u64_push(regmap, (uint64_t) ~1);
+	return (regmap->n - 1) * 64;
+}
+
+void free_reg(struct vec_u64* regmap, uint64_t reg)
+{
+	uint64_t i=reg/64, k=reg%64;
+	assert((regmap->v[i] & (1<<k)) == 0);
+	regmap->v[i] |= (1<<k);
+}
+
+void run_vm(uint64_t* code, uint64_t* regs)
+{
+	uint64_t* p = code;
+	while(1) {
+		switch(*p) {
+			case IN_NOP: p++; break;
+			case IN_DIE: return;
+			case IN_MVI: regs[p[1]]  = regs[regs[p[2]]]; p += 3; break;
+			case IN_MOV: regs[p[1]]  = regs[p[2]]; p += 3; break;
+			case IN_ADD: regs[p[1]] += regs[p[2]]; p += 3; break;
+			case IN_SUB: regs[p[1]] -= regs[p[2]]; p += 3; break;
+			case IN_MUL: regs[p[1]] *= regs[p[2]]; p += 3; break;
+			case IN_DIV: regs[p[1]] /= regs[p[2]]; p += 3; break;
+			case IN_MOD: regs[p[1]] %= regs[p[2]]; p += 3; break;
+			case IN_CMP:
+				regs[0] = (uint64_t)(((regs[p[1]] < regs[p[2]]) << 1) | (regs[p[1]] > regs[p[2]]));
+				p += 3;
+				break;
+			case IN_IN:
+				assert(p[2] == 0); /*only port 0 for now*/
+				printf("> ");
+				assert(scanf(" %ld", &regs[p[1]]) == 1);
+				p += 3;
+				break;
+			case IN_OUT:
+				assert(p[1] == 0); /*only port 0 for now*/
+				printf("%ld\n", regs[p[2]]);
+				p += 3;
+				break;
+			case IN_JMP:
+				p = code + p[1];
+				break;
+			case IN_JZ:
+				if (regs[p[1]] == 0)
+					p = code + p[2];
+				else
+					p += 3;
+				break;
+			default:
+				assert(false);
+		}
+	}
+}
+
 int main(int argc, char** argv)
 {
 	size_t i;
@@ -1087,7 +1177,7 @@ int main(int argc, char** argv)
 	input.paren_pairs = &paren_pairs;
 	input.text = str_view_str(text);
 
-	ast = parse_func_literal(&input);
+	ast = parse_expr(&input);
 	
 	for (i=0; i<diag_stack.n; i++)
 		print_diag(&diag_stack.v[i]);
@@ -1100,6 +1190,23 @@ int main(int argc, char** argv)
 
 	print_ast(ast);
 	puts("");
+
+	/* temporary vm test */
+	{
+		uint64_t regs[10] = {10, 20, 0};
+		uint64_t code[] = {
+			IN_IN, 5, 0,
+			IN_NOP,
+			IN_IN, 6, 0,
+			IN_ADD, 6, 5,
+			IN_OUT, 0, 6,
+			IN_DIE
+		};
+		
+		for (i=0; i<10; i++) printf("%2ld ", regs[i]); printf("\n");
+		run_vm(code, regs);
+		for (i=0; i<10; i++) printf("%2ld ", regs[i]); printf("\n");
+	}
 
 end:
 	free_ast_node(ast);
