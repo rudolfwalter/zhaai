@@ -5,7 +5,7 @@
 while read
 do
 	clear
-	if ./a.out
+	if ./a.out "$@"
 	then
 		echo -e "\e[42m \e[0m"  #green
 	else
