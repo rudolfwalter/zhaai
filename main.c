@@ -109,7 +109,8 @@ enum token_t
 	TOK_AND,       /*  &            */
 	TOK_AND2,      /*  &&           */
 	TOK_PIPE2,     /*  ||           */
-	TOK_DIRECTIVE, /*  #stuff       */
+	TOK_HASH,      /*  #            */
+	TOK_AT,        /*  @            */
 	TOK_INT,       /*  123          */
 	TOK_FLOAT,     /*  123.45       */
 	TOK_STRING,    /*  "abc"        */
@@ -118,11 +119,11 @@ enum token_t
 	TOK__N
 };
 
-char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRACE","COLON","BANG","BANGEQ","EQ","EQ2","LESS","LEQ","MORE","MEQ","PLUS","MINUS","MINUS3","ARROW","STAR","SLASH","DOT","DOT2","DOT3","COMMA","SEMI","AND","AND2","PIPE2","DIRECTIVE","INT","FLOAT","STRING","ID","EOF"};
+char* token_t_names[] = {"LPAREN","RPAREN","LBRACKET","RBRACKET","LBRACE","RBRACE","COLON","BANG","BANGEQ","EQ","EQ2","LESS","LEQ","MORE","MEQ","PLUS","MINUS","MINUS3","ARROW","STAR","SLASH","DOT","DOT2","DOT3","COMMA","SEMI","AND","AND2","PIPE2","HASH", "AT","INT","FLOAT","STRING","ID","EOF"};
 
 GS_ASSERT(sizeof(token_t_names) == TOK__N*sizeof(token_t_names[0]));
 
-size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 3, 1, 1, 1, 2, 2, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, 0};
+size_t token_t_len[] = {1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 1, 3, 2, 1, 1, 1, 2, 3, 1, 1, 1, 2, 2, 1, 1, SZ_MAX, SZ_MAX, SZ_MAX, SZ_MAX, 0};
 
 GS_ASSERT(sizeof(token_t_len) == TOK__N*sizeof(token_t_len[0]));
 
@@ -331,17 +332,8 @@ bool lex(struct str_view text, struct vec_token* v, struct map_ptoken* paren_pai
 						
 				add(PIPE2);
 				break;
-			case '#':
-				if (!isalpha(p[1])) {
-					diag(DIAG_ERR, text, p+1, "Expected directive name after '#'.");
-					result = false;
-				}
-				
-				k = 2;
-				while (p[k] == '_' || isalnum(p[k])) k++;
-				
-				addl(DIRECTIVE, k);
-				break;
+			case '#': add(HASH); break;
+			case '@': add(AT); break;
 			case '"':
 				k = 1;
 				while (p[k] != '\0' && (p[k] != '"' || p[k-1] == '\\')) k++;
@@ -486,7 +478,7 @@ struct ast_func {
 	struct vec_past_node params;
 	struct str_view ret_type;
 	struct ast_node* body;
-	bool foreign; /* TODO: replace with directive vector */
+	/* TODO: modifiers */
 };
 
 struct ast_node {
@@ -864,7 +856,7 @@ end:
 	return result;
 }
 
-struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
+struct ast_node* parse_func_literal(struct input* input)
 {
 	struct ast_node* an = malloc(sizeof(struct ast_node));
 	struct ast_node* result = an;
@@ -873,7 +865,6 @@ struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
 	an->type = AN_FUNC_LIT;
 	an->_.func.params = vec_past_node_make(1);
 	an->_.func.body = NULL;
-	an->_.func.foreign = false;
 
 	if (input->cur->type != TOK_LPAREN)
 		DIAGHARD(NULL, ERR, "Expected parenthesized parameter list at beginning of function literal.");
@@ -921,21 +912,9 @@ struct ast_node* parse_func_literal(struct input* input, bool foreign_allowed)
 	an->_.func.ret_type = input->cur->text;
 	input->cur++;
 
-	if (input->cur->type == TOK_DIRECTIVE) {
-		if (str_view_is(input->cur->text, "foreign")) {
-			if (foreign_allowed)
-				an->_.func.foreign = true;
-			else
-				DIAGSOFT(NULL, ERR, "#foreign directive not allowed in this context.");
-		} else {
-			/* TODO */
-			DIAGSOFT(NULL, ERR, "Currently only #foreign directive is allowed on functions.");
-		}
-	}
+	/* TODO: modifiers */
 
-	if (input->cur->type == TOK_LBRACE && an->_.func.foreign)
-		DIAGHARD(NULL, ERR, "Foreign functions must not have a body.");
-	else if (input->cur->type != TOK_LBRACE)
+	if (input->cur->type != TOK_LBRACE)
 		DIAGHARD(NULL, ERR, "Expected function body between braces.");
 
 	an->_.func.body = parse_code_block(input);
@@ -986,7 +965,7 @@ struct ast_node* parse_decl(struct input* input)
 			assert(pair != NULL);
 
 			if ((*pair)[1].type == TOK_ARROW || (*pair)[1].type == TOK_LBRACE) {
-				an->_.decl.init = parse_func_literal(input, true /* TODO */);
+				an->_.decl.init = parse_func_literal(input /* TODO */);
 				if (an->_.decl.init == NULL)
 					DIAGHARD(NULL, ERR, "Expected valid function literal.");
 			}
@@ -1108,7 +1087,7 @@ int main(int argc, char** argv)
 	input.paren_pairs = &paren_pairs;
 	input.text = str_view_str(text);
 
-	ast = parse_func_literal(&input, true);
+	ast = parse_func_literal(&input);
 	
 	for (i=0; i<diag_stack.n; i++)
 		print_diag(&diag_stack.v[i]);
