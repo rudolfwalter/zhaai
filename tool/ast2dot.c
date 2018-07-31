@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "util.h"
 
 #define VEC_TYPE int
 #include "vec.c"
@@ -10,7 +11,7 @@ static struct vec_int stack;
 
 void error(int code)
 {
-	printf("\tnERROR [shape=egg,label=\"???\",color=\"red\"];\n");
+	printf("\tnERROR [shape=egg,label=\"???\\n(%d)\",color=\"red\"];\n", code);
 	if (stack.n > 0)
 		printf("\tn%d -> nERROR;\n", stack.v[stack.n-1]);
 	printf("}\n");
@@ -58,7 +59,7 @@ int main(void)
 			continue;
 		}
 
-		k = scanf("'%98[^']'", s+1);
+		k = scanf("'%97[^']'", s+1);
 		if (k == EOF) error(3);
 		if (k > 0) {
 			s[0]='\'';
