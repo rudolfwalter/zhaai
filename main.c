@@ -528,7 +528,7 @@ void free_ast_node(struct ast_node* node)
 		   node->type != AN_STR_LIT &&
 		   node->type != AN_ID &&
 		   node->type != AN_PARAM)
-		assert(false);
+		assertl(false);
 
 	free(node);
 }
@@ -963,7 +963,7 @@ struct ast_node* parse_decl(struct input* input)
 		/* TODO: allow function literals in expressions, not just as self-standing initializers */
 		if (t.type == TOK_LPAREN) {
 			struct token** pair = map_ptoken_get(input->paren_pairs, &t);
-			assert(pair != NULL);
+			assertl(pair != NULL);
 
 			if ((*pair)[1].type == TOK_ARROW || (*pair)[1].type == TOK_LBRACE) {
 				an->_.decl.init = parse_func_literal(input /* TODO */);
@@ -1085,7 +1085,7 @@ uint64_t alloc_reg(struct vec_u64* regmap /*array of bits, 0=used, 1=free*/)
 void free_reg(struct vec_u64* regmap, uint64_t reg)
 {
 	uint64_t i=reg/64, k=reg%64;
-	assert((regmap->v[i] & (1<<k)) == 0);
+	assertl((regmap->v[i] & (1<<k)) == 0);
 	regmap->v[i] |= (1<<k);
 }
 
@@ -1108,13 +1108,13 @@ void run_vm(uint64_t* code, uint64_t* regs)
 				p += 3;
 				break;
 			case IN_IN:
-				assert(p[2] == 0); /*only port 0 for now*/
+				assertl(p[2] == 0); /*only port 0 for now*/
 				printf("> ");
-				assert(scanf(" %ld", &regs[p[1]]) == 1);
+				assertl(scanf(" %ld", &regs[p[1]]) == 1);
 				p += 3;
 				break;
 			case IN_OUT:
-				assert(p[1] == 0); /*only port 0 for now*/
+				assertl(p[1] == 0); /*only port 0 for now*/
 				printf("%ld\n", regs[p[2]]);
 				p += 3;
 				break;
@@ -1128,7 +1128,8 @@ void run_vm(uint64_t* code, uint64_t* regs)
 					p += 3;
 				break;
 			default:
-				assert(false);
+				assertl(false);
+				return; /* TODO: signal an error */
 		}
 	}
 }

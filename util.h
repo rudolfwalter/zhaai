@@ -10,6 +10,9 @@
 
 #define GS_ASSERT(cond) enum { PP_CONCAT(gs_assert_line_, __LINE__) = 1/(!!(cond)) }
 
+#define assertl1(x) assert(x)
+#define assertl(x) assertl1(x && __LINE__)
+
 #ifndef int8_t
 typedef signed   char       int8_t;
 #endif

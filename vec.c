@@ -11,6 +11,10 @@
 #define VEC_TYPE_NAME VEC_TYPE
 #endif
 
+#ifndef PP_CONCAT
+#error PP_CONCAT must be defined when including vec.c.
+#endif
+
 #define VEC_STRUCT       PP_CONCAT(vec_,         VEC_TYPE_NAME)
 #define VEC_MAKE_FUNC    PP_CONCAT(VEC_STRUCT, _make)
 #define VEC_DESTROY_FUNC PP_CONCAT(VEC_STRUCT, _destroy)
