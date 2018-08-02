@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdarg.h>
 #include "util.h"
 #include "bits.c"
 
@@ -431,6 +432,10 @@ GS_ASSERT(sizeof(op_t_names) == OP__N*sizeof(op_t_names[0]));
 int op_t_precedence[] = {8, 8, 8, 7, 7, 7, 7, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 2, 1, -1};
 
 GS_ASSERT(sizeof(op_t_precedence) == OP__N*sizeof(op_t_precedence[0]));
+
+bool op_t_commutative[] = {false, false, false, true, true, true, true, true, false, false, true, false, false, false, false, false, true, true, false/*?*/, false/*?*/, false};
+
+GS_ASSERT(sizeof(op_t_commutative) == OP__N*sizeof(op_t_commutative[0]));
 
 struct ast_node;
 
@@ -1048,8 +1053,8 @@ void print_ast(struct ast_node* an)
 #define VEC_TYPE_NAME u64
 #include "vec.c"
 
-enum instruction
-{
+enum instruction {
+	IN_NONE=-1,
 	IN_NOP,
 	IN_DIE,
 	IN_MVI, /* to, fromptr */
@@ -1059,6 +1064,7 @@ enum instruction
 	IN_MUL, /* to, from    */
 	IN_DIV, /* to, from    */
 	IN_MOD, /* to, from    */
+	IN_NOT, /* reg         */
 	IN_CMP, /* left, right (result goes into reg 0) */
 	IN_IN,  /* to, from    */
 	IN_OUT, /* to, from    */
@@ -1066,6 +1072,14 @@ enum instruction
 	IN_JZ,  /* reg, to     */
 	IN__N
 };
+
+char* instruction_names[] = {"NOP","DIE","MVI","MOV","ADD","SUB","MUL","DIV","MOD","NOT","CMP","IN","OUT","JMP","JZ"};
+
+GS_ASSERT(sizeof(instruction_names) == IN__N*sizeof(instruction_names[0]));
+
+size_t instruction_arg_n[] = {0, 0, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1, 2};
+
+GS_ASSERT(sizeof(instruction_arg_n) == IN__N*sizeof(instruction_arg_n[0]));
 
 uint64_t alloc_reg(struct vec_u64* regmap /*array of bits, 0=used, 1=free*/)
 {
@@ -1089,9 +1103,18 @@ void free_reg(struct vec_u64* regmap, uint64_t reg)
 	regmap->v[i] |= (1<<k);
 }
 
-void run_vm(uint64_t* code, uint64_t* regs)
+struct program {
+	struct vec_u64 code;
+	struct vec_u64 regs;
+};
+
+void run_vm(struct program* prog)
 {
+	uint64_t* code = prog->code.v;
+	uint64_t* regs = prog->regs.v;
 	uint64_t* p = code;
+
+	/* TODO: use p += instruction_arg_n[...] */
 	while(1) {
 		switch(*p) {
 			case IN_NOP: p++; break;
@@ -1103,6 +1126,7 @@ void run_vm(uint64_t* code, uint64_t* regs)
 			case IN_MUL: regs[p[1]] *= regs[p[2]]; p += 3; break;
 			case IN_DIV: regs[p[1]] /= regs[p[2]]; p += 3; break;
 			case IN_MOD: regs[p[1]] %= regs[p[2]]; p += 3; break;
+			case IN_NOT: regs[p[1]] = !regs[p[1]]; p += 2; break;
 			case IN_CMP:
 				regs[0] = (uint64_t)(((regs[p[1]] < regs[p[2]]) << 1) | (regs[p[1]] > regs[p[2]]));
 				p += 3;
@@ -1128,9 +1152,163 @@ void run_vm(uint64_t* code, uint64_t* regs)
 					p += 3;
 				break;
 			default:
+				fprintf(stderr, "Illegal instruction: %ld at address %ld (0x%lx).\n", *p, p-code, p-code);
 				assertl(false);
 				return; /* TODO: signal an error */
 		}
+	}
+}
+
+enum instruction op_to_instr(enum op_t op)
+{
+	switch(op) {
+		/*case OP_CALL:  return IN_;*/
+		/*case OP_INDEX: return IN_;*/
+		/*case OP_DOT:   return IN_;*/
+		/*case OP_NEG:   return IN_NEG;*/
+		case OP_NOT:   return IN_NOT;
+		case OP_DEREF: return IN_MVI;
+		/*case OP_ADDR:  return IN_;*/
+		case OP_TIMES: return IN_MUL;
+		case OP_DIV:   return IN_DIV;
+		case OP_MOD:   return IN_MOD;
+		case OP_ADD:   return IN_ADD;
+		case OP_SUB:   return IN_SUB;
+		/*case OP_LESS:  return IN_;*/
+		/*case OP_LEQ :  return IN_;*/
+		/*case OP_MORE:  return IN_;*/
+		/*case OP_MEQ:   return IN_;*/
+		/*case OP_EQ:    return IN_;*/
+		/*case OP_NEQ:   return IN_;*/
+		/*case OP_AND:   return IN_;*/
+		/*case OP_OR:    return IN_;*/
+		default:       return IN_NONE;
+	}
+}
+
+struct storage {
+	uint64_t addr;
+	bool temporary;
+};
+
+struct emit_data {
+	struct program prog;
+	struct vec_u64 regmap;
+};
+
+void init_reg(struct vec_u64* regs, uint64_t addr, uint64_t value)
+{
+	if (regs->n > addr) {
+		assertl(regs->v[addr] == 0); /*no double-init*/
+		regs->v[addr] = value;
+	} else {
+		/* TODO: write a resize() function for vectors? */
+		while (regs->n < addr)
+			vec_u64_push(regs, 0);
+		vec_u64_push(regs, value);
+	}
+}
+
+void emit(struct vec_u64* code, enum instruction instr, ...)
+{
+	size_t i;
+	va_list args;
+	va_start(args, instr);
+
+	vec_u64_push(code, (uint64_t) instr);
+	for (i=0; i<instruction_arg_n[instr]; i++)
+		vec_u64_push(code, va_arg(args, uint64_t));
+	
+	assertl(va_arg(args, unsigned) == VEND);
+	va_end(args);
+}
+
+struct storage emit_int_lit(uint64_t value, struct emit_data* out)
+{
+	struct storage result;
+	result.temporary = false;
+	result.addr = alloc_reg(&out->regmap);
+
+	/* TODO: deduplicate literals */
+	init_reg(&out->prog.regs, result.addr, value);
+
+	/* printf("Using register %ld for literal value %ld.\n", result.addr, value); */
+	return result;
+}
+
+struct storage emit_expr(struct ast_node* node, struct emit_data* out)
+{
+	struct vec_u64* code = &out->prog.code;
+	struct vec_u64* regs = &out->prog.regs;
+	struct storage result;
+
+	if (node->type == AN_INT_LIT) {
+		result = emit_int_lit(node->_.int_lit, out);
+	} else if (node->type == AN_OP1) {
+		enum instruction instr = op_to_instr(node->_.op1.type);
+		struct storage childstor = emit_expr(node->_.op1.child, out);
+		if (instr == IN_NONE) {
+			result.addr = (uint64_t) -1;
+			assertl(false);
+			return result; /* TODO: better error reporting? */
+		}
+		if (!childstor.temporary) {
+			result.temporary = true;
+			result.addr = alloc_reg(&out->regmap);
+			init_reg(regs, result.addr, 0);
+			emit(code, IN_MOV, result.addr, childstor.addr, VEND);
+		} else result = childstor;
+
+		emit(code, instr, result.addr, VEND);
+	} else if (node->type == AN_OP2) {
+		enum instruction instr = op_to_instr(node->_.op2.type);
+		struct storage lstor = emit_expr(node->_.op2.left, out);
+		struct storage rstor = emit_expr(node->_.op2.right, out);
+		if (instr == IN_NONE) {
+			result.addr = (uint64_t) -1;
+			assertl(false);
+			return result; /* TODO: better error reporting? */
+		}
+		if (lstor.temporary) {
+			result = lstor;
+			if (rstor.temporary)
+				free_reg(&out->regmap, rstor.addr);
+			emit(code, instr, result.addr, rstor.addr, VEND);
+		} else if (rstor.temporary && op_t_commutative[node->_.op2.type]) {
+			result = rstor;
+			emit(code, instr, result.addr, lstor.addr, VEND);
+		} else {
+			result.temporary = true;
+			result.addr = alloc_reg(&out->regmap);
+			init_reg(regs, result.addr, 0);
+			emit(code, IN_MOV, result.addr, lstor.addr, VEND);
+			emit(code, instr, result.addr, rstor.addr, VEND);
+		}
+	} else {
+		/* TODO */
+		assertl(false);
+		result.addr = (uint64_t) -1;
+	}
+	return result;
+}
+
+void print_code(struct vec_u64* code)
+{
+	uint64_t* p = code->v;
+	uint64_t* end = p + code->n;
+	size_t i;
+	while (p < end) {
+		printf("[%3ld] ", p - code->v);
+		if (*p >= IN__N) {
+			printf("XXX  ILLEGAL INSTRUCTION %ld\n", *p);
+			return;
+		}
+		printf("%8s ", instruction_names[*p]);
+		for (i=1; i<=instruction_arg_n[*p]; i++) {
+			printf("%8ld ", p[i]);
+		}
+		printf("\n");
+		p += instruction_arg_n[*p] + 1;
 	}
 }
 
@@ -1192,21 +1370,20 @@ int main(int argc, char** argv)
 	print_ast(ast);
 	puts("");
 
-	/* temporary vm test */
 	{
-		uint64_t regs[10] = {10, 20, 0};
-		uint64_t code[] = {
-			IN_IN, 5, 0,
-			IN_NOP,
-			IN_IN, 6, 0,
-			IN_ADD, 6, 5,
-			IN_OUT, 0, 6,
-			IN_DIE
-		};
-		
-		for (i=0; i<10; i++) printf("%2ld ", regs[i]); printf("\n");
-		run_vm(code, regs);
-		for (i=0; i<10; i++) printf("%2ld ", regs[i]); printf("\n");
+	struct emit_data emit_data;
+	struct storage expr_result_stor;
+	emit_data.prog.code = vec_u64_make(10);
+	emit_data.prog.regs = vec_u64_make(10);
+	emit_data.regmap = vec_u64_make(10);
+	expr_result_stor = emit_expr(ast, &emit_data);
+	emit(&emit_data.prog.code, IN_OUT, 0, expr_result_stor.addr, VEND);
+	emit(&emit_data.prog.code, IN_DIE, VEND);
+	printf("CODE: "); for (i=0; i<emit_data.prog.code.n; i++) printf("%2ld ", emit_data.prog.code.v[i]); printf("\n");
+	printf("REGS: "); for (i=0; i<emit_data.prog.regs.n; i++) printf("%2ld ", emit_data.prog.regs.v[i]); printf("\n");
+	printf("ASM:\n"); print_code(&emit_data.prog.code);
+	printf("Running:\n");
+	run_vm(&emit_data.prog);
 	}
 
 end:

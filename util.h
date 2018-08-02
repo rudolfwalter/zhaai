@@ -13,6 +13,8 @@
 #define assertl1(x) assert(x)
 #define assertl(x) assertl1(x && __LINE__)
 
+#define VEND 0xED6ECACA /*varargs sentinel*/
+
 #ifndef int8_t
 typedef signed   char       int8_t;
 #endif
