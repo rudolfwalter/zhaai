@@ -394,10 +394,11 @@ enum ast_node_t {
 	AN_OP2,        /* x + y                                      */
 	AN_OP1N,       /* func(x, y)                                 */
 	AN_DECL,       /* foo : Bar = baz;  foo : Bar : baz;         */
+	AN_BLOCK,      /* { stmt1; stmt2; stmt3; }                   */
 	AN__N
 };
 
-char* ast_node_t_names[] = {"RUN_EXPR", "INT", "FLOAT", "STR", "FUNC", "PARAM", "STRUCT", "ID", "OP1", "OP2", "CALL", "VAR_DECL"};
+char* ast_node_t_names[] = {"RUN_EXPR", "INT", "FLOAT", "STR", "FUNC", "PARAM", "STRUCT", "ID", "OP1", "OP2", "CALL", "VAR_DECL", "BLOCK"};
 
 GS_ASSERT(sizeof(ast_node_t_names) == AN__N*sizeof(ast_node_t_names[0]));
 
@@ -477,6 +478,10 @@ struct ast_decl {
 	struct ast_node* init;
 };
 
+struct ast_block {
+	struct vec_past_node stmts;
+};
+
 struct ast_param {
 	struct str_view name;
 	struct str_view type;
@@ -502,6 +507,7 @@ struct ast_node {
 		struct ast_decl decl;
 		struct ast_func func;
 		struct ast_param param;
+		struct ast_block block;
 		/* TODO */
 	} _;
 };
@@ -529,6 +535,9 @@ void free_ast_node(struct ast_node* node)
 			free_ast_node(node->_.func.params.v[i]);
 		vec_past_node_destroy(&node->_.func.params);
 		free_ast_node(node->_.func.body);
+	} else if (node->type == AN_BLOCK) {
+		for (i=0; i<node->_.block.stmts.n; i++)
+			free_ast_node(node->_.block.stmts.v[i]);
 	} else if (node->type != AN_NONE &&
 	           node->type != AN_INT_LIT &&
 		   node->type != AN_FLOAT_LIT &&
@@ -842,19 +851,110 @@ end:
 #	undef t
 }
 
-struct ast_node* parse_code_block(struct input* input)
+struct ast_node* parse_func_literal(struct input* input);
+
+struct ast_node* parse_decl(struct input* input)
+{
+#	define t (*input->cur)
+
+	struct ast_node* an = malloc(sizeof(struct ast_node));
+	struct ast_node* result = an;
+	
+	an->type = AN_DECL;
+	an->_.decl.type = str_view(NULL, 0);
+	an->_.decl.init = NULL;
+
+	if (t.type != TOK_ID)
+		DIAGHARD(NULL, ERR, "Expected identifier.");
+
+	an->_.decl.name = t.text;
+
+	input->cur++;
+	if (t.type != TOK_COLON)
+		DIAGHARD(NULL, ERR, "Expected ':'.");
+
+	input->cur++;
+	if (t.type == TOK_ID) {
+		an->_.decl.type = t.text;
+		input->cur++;
+	}
+
+	if (t.type == TOK_EQ || t.type == TOK_COLON) {
+		an->_.decl.is_const = t.type==TOK_COLON;
+		input->cur++;
+
+		/* TODO: allow function literals in expressions, not just as self-standing initializers */
+		if (t.type == TOK_LPAREN) {
+			struct token** pair = map_ptoken_get(input->paren_pairs, &t);
+			assertl(pair != NULL);
+
+			if ((*pair)[1].type == TOK_ARROW || (*pair)[1].type == TOK_LBRACE) {
+				an->_.decl.init = parse_func_literal(input /* TODO */);
+				if (an->_.decl.init == NULL)
+					DIAGHARD(NULL, ERR, "Expected valid function literal.");
+			}
+		}
+
+		if (an->_.decl.init == NULL) {
+			an->_.decl.init = parse_expr(input);
+			if (an->_.decl.init == NULL)
+				DIAGHARD(NULL, ERR, "Expected valid expression as initializer.");
+		}
+	} else {
+		if (an->_.decl.type.n == 0)
+			DIAGHARD(NULL, ERR, "Expected ':' or '='.");
+	}
+
+end:
+	if (result == NULL) free_ast_node(an);
+	return result;
+
+#	undef t
+}
+
+struct ast_node* parse_stmt(struct input* input)
+{
+	struct ast_node* result = NULL;
+
+	if (input->cur->type == TOK_ID && input->cur[1].type == TOK_COLON) {
+		result = parse_decl(input);
+	} else if (input->cur->type == TOK_ID && str_view_is(input->cur->text, "if")) {
+		/* TODO */
+		DIAGHARD(NULL, ERR, "We currently do not parse if statements.");
+	} else if (input->cur->type == TOK_ID && str_view_is(input->cur->text, "for")) {
+		/* TODO */
+		DIAGHARD(NULL, ERR, "We currently do not parse for statements.");
+	} else {
+		result = parse_expr(input);
+		/* TODO: warn if root is neither assigment nor function call */
+	}
+
+	if (input->cur->type != TOK_SEMI)
+		DIAGHARD(NULL, ERR, "Expected semicolon at the end of the statement.");
+	
+end:
+	return result;
+}
+
+struct ast_node* parse_block(struct input* input)
 {
 	struct ast_node* an = malloc(sizeof(struct ast_node));
 	struct ast_node* result = an;
 
-	an->type = AN_NONE; /* TODO */
+	an->type = AN_BLOCK;
 
 	if (input->cur->type != TOK_LBRACE)
 		DIAGHARD(NULL, ERR, "Expected '{'.");
-
 	input->cur++;
 
-	/* TODO */
+	an->_.block.stmts = vec_past_node_make(10);
+	while (input->cur->type != TOK_RBRACE) {
+		struct ast_node* stmt = parse_stmt(input);
+		if (stmt == NULL)
+			RET(NULL);
+		vec_past_node_push(&an->_.block.stmts, stmt);
+		input->cur++;
+	}
 
 	if (input->cur->type != TOK_RBRACE)
 		DIAGHARD(NULL, ERR, "Expected '}'.");
@@ -925,7 +1025,7 @@ struct ast_node* parse_func_literal(struct input* input)
 	if (input->cur->type != TOK_LBRACE)
 		DIAGHARD(NULL, ERR, "Expected function body between braces.");
 
-	an->_.func.body = parse_code_block(input);
+	an->_.func.body = parse_block(input);
 	if (an->_.func.body == NULL)
 		RET(NULL);
 
@@ -935,65 +1035,6 @@ end:
 		free_ast_node(an);
 	}
 	return result;
-}
-
-struct ast_node* parse_decl(struct input* input)
-{
-#	define t (*input->cur)
-
-	struct ast_node* an = malloc(sizeof(struct ast_node));
-	struct ast_node* result = an;
-	
-	an->type = AN_DECL;
-	an->_.decl.type = str_view(NULL, 0);
-	an->_.decl.init = NULL;
-
-	if (t.type != TOK_ID)
-		DIAGHARD(NULL, ERR, "Expected identifier.");
-
-	an->_.decl.name = t.text;
-
-	input->cur++;
-	if (t.type != TOK_COLON)
-		DIAGHARD(NULL, ERR, "Expected ':'.");
-
-	input->cur++;
-	if (t.type == TOK_ID) {
-		an->_.decl.type = t.text;
-		input->cur++;
-	}
-
-	if (t.type == TOK_EQ || t.type == TOK_COLON) {
-		an->_.decl.is_const = t.type==TOK_COLON;
-		input->cur++;
-
-		/* TODO: allow function literals in expressions, not just as self-standing initializers */
-		if (t.type == TOK_LPAREN) {
-			struct token** pair = map_ptoken_get(input->paren_pairs, &t);
-			assertl(pair != NULL);
-
-			if ((*pair)[1].type == TOK_ARROW || (*pair)[1].type == TOK_LBRACE) {
-				an->_.decl.init = parse_func_literal(input /* TODO */);
-				if (an->_.decl.init == NULL)
-					DIAGHARD(NULL, ERR, "Expected valid function literal.");
-			}
-		}
-
-		if (an->_.decl.init == NULL) {
-			an->_.decl.init = parse_expr(input);
-			if (an->_.decl.init == NULL)
-				DIAGHARD(NULL, ERR, "Expected valid expression as initializer.");
-		}
-	} else {
-		if (an->_.decl.type.n == 0)
-			DIAGHARD(NULL, ERR, "Expected ':' or '='.");
-	}
-
-end:
-	if (result == NULL) free_ast_node(an);
-	return result;
-
-#	undef t
 }
 
 void print_ast(struct ast_node* an)
@@ -1045,6 +1086,11 @@ void print_ast(struct ast_node* an)
 	} else if (an->type == AN_PARAM) {
 		printf("PARAM['%.*s''%.*s']", (int) an->_.param.name.n, an->_.param.name.p,
 		                              (int) an->_.param.type.n, an->_.param.type.p);
+	} else if (an->type == AN_BLOCK) {
+		printf("BLOCK[");
+		for (i=0; i<an->_.block.stmts.n; i++)
+			print_ast(an->_.block.stmts.v[i]);
+		printf("]");
 	} else {
 		printf("TODO[]");
 		/* TODO */
@@ -1358,7 +1404,7 @@ int main(int argc, char** argv)
 	input.paren_pairs = &paren_pairs;
 	input.text = str_view_str(text);
 
-	ast = parse_expr(&input);
+	ast = parse_block(&input);
 	
 	for (i=0; i<diag_stack.n; i++)
 		print_diag(&diag_stack.v[i]);
@@ -1372,6 +1418,7 @@ int main(int argc, char** argv)
 	print_ast(ast);
 	puts("");
 
+	if((0))
 	{
 	struct emit_data emit_data;
 	struct storage expr_result_stor;
