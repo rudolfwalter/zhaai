@@ -55,7 +55,7 @@ struct MAP_STRUCT MAP_MAKE_N_FUNC(size_t buckets_n)
 	return m;
 }
 
-struct MAP_STRUCT MAP_MAKE_FUNC()
+struct MAP_STRUCT MAP_MAKE_FUNC(void)
 {
 	return MAP_MAKE_N_FUNC(7);
 }
