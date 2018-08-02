@@ -256,6 +256,7 @@ bool lex(struct str_view text, struct vec_token* v, struct map_ptoken* paren_pai
 			case '!':
 				if (p[1] == '=') add(BANGEQ);
 				else             add(BANG);
+				break;
 			case '=':
 				if (p[1] == '=') add(EQ2);
 				else             add(EQ);
@@ -372,6 +373,7 @@ bool lex(struct str_view text, struct vec_token* v, struct map_ptoken* paren_pai
 	vec_token_push(v, token_of(TOK_EOF, str_view(text.p+text.n, 0)));
 	vec_token_shrink(v);
 end:
+	vec_ptoken_destroy(&paren_stack);
 	return result;
 
 #	undef add
